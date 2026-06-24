@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SAP2000 Live Model Demo</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+    }
+  }
+  </script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+    #header {
+      background: #161b22; border-bottom: 1px solid #30363d;
+      padding: 10px 20px; display: flex; align-items: center; gap: 16px;
+    }
+    #header h1 { font-size: 15px; font-weight: 600; color: #f0f6fc; }
+    .chip {
+      background: #21262d; border: 1px solid #30363d; border-radius: 12px;
+      padding: 3px 10px; font-size: 12px; color: #8b949e;
+    }
+    .chip.green { border-color: #238636; color: #3fb950; }
+    .chip.blue  { border-color: #1f6feb; color: #2f81f7; }
+    #body { display: flex; flex: 1; overflow: hidden; }
+    #info {
+      width: 260px; background: #161b22; border-right: 1px solid #30363d;
+      padding: 16px; overflow-y: auto; flex-shrink: 0;
+    }
+    #info h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8b949e; margin-bottom: 10px; }
+    .info-row { display: flex; justify-content: space-between; align-items: center;
+                padding: 5px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+    .info-row .lbl { color: #8b949e; }
+    .info-row .val { color: #f0f6fc; font-weight: 500; }
+    .section-title { font-size: 11px; font-weight: 600; color: #8b949e; text-transform: uppercase;
+                     letter-spacing: .08em; margin: 14px 0 6px; }
+    .legend-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b949e; margin-bottom: 5px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    #canvas-wrap { flex: 1; position: relative; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #status { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+              background: #161b22cc; border: 1px solid #30363d; border-radius: 8px;
+              padding: 6px 14px; font-size: 12px; color: #8b949e; white-space: nowrap; }
+    #loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+               background: #0d1117; gap: 10px; }
+    #loading-msg  { font-size: 14px; color: #8b949e; }
+    #loading-step { font-size: 12px; color: #3fb950; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>SAP2000 AI Builder — Live Demo</h1>
+  <span class="chip blue">kip/ft</span>
+  <span class="chip">4 Spans × 3 Bays</span>
+  <span class="chip green">W24x94 Girders</span>
+  <span class="chip green">W18x35 Beams</span>
+  <span class="chip">20/80 psf</span>
+</div>
+
+<div id="body">
+  <div id="info">
+    <h2>Project</h2>
+    <div class="info-row"><span class="lbl">Name</span><span class="val">Level-3 Floor</span></div>
+    <div class="info-row"><span class="lbl">Units</span><span class="val">kip / ft</span></div>
+    <div class="info-row"><span class="lbl">Type</span><span class="val">Building Floor</span></div>
+
+    <div class="section-title">Grid</div>
+    <div class="info-row"><span class="lbl">Spans (X)</span><span class="val">4 × 20 ft = 80 ft</span></div>
+    <div class="info-row"><span class="lbl">Bays  (Y)</span><span class="val">3 × 25 ft = 75 ft</span></div>
+    <div class="info-row"><span class="lbl">Nodes</span><span class="val">5 × 4 = 20</span></div>
+
+    <div class="section-title">Framing</div>
+    <div class="info-row"><span class="lbl">Girders</span><span class="val">W24x94</span></div>
+    <div class="info-row"><span class="lbl">Beams</span><span class="val">W18x35</span></div>
+    <div class="info-row"><span class="lbl">Girder lines</span><span class="val">4 (X-dir)</span></div>
+    <div class="info-row"><span class="lbl">Beam lines</span><span class="val">5 (Y-dir)</span></div>
+    <div class="info-row"><span class="lbl">Frame elements</span><span class="val">31 total</span></div>
+
+    <div class="section-title">Slab</div>
+    <div class="info-row"><span class="lbl">Thickness</span><span class="val">8 in (0.667 ft)</span></div>
+    <div class="info-row"><span class="lbl">Type</span><span class="val">Thick shell</span></div>
+    <div class="info-row"><span class="lbl">fc</span><span class="val">4 ksi</span></div>
+    <div class="info-row"><span class="lbl">Mesh</span><span class="val">2 ft</span></div>
+    <div class="info-row"><span class="lbl">Shell elements</span><span class="val">1440 total</span></div>
+
+    <div class="section-title">Supports</div>
+    <div class="info-row"><span class="lbl">Count</span><span class="val">20 piles</span></div>
+    <div class="info-row"><span class="lbl">Type</span><span class="val">Pinned</span></div>
+
+    <div class="section-title">Loads</div>
+    <div class="info-row"><span class="lbl">SDL</span><span class="val">20 psf</span></div>
+    <div class="info-row"><span class="lbl">LL</span><span class="val">80 psf</span></div>
+    <div class="info-row"><span class="lbl">Moving</span><span class="val">None</span></div>
+    <div class="info-row"><span class="lbl">Self-wt</span><span class="val">DEAD × 1.0</span></div>
+
+    <div class="section-title">Legend</div>
+    <div class="legend-row"><div class="dot" style="background:#2f81f7"></div>Girders (W24x94)</div>
+    <div class="legend-row"><div class="dot" style="background:#3fb950"></div>Beams (W18x35)</div>
+    <div class="legend-row"><div class="dot" style="background:#8b949e;opacity:.7"></div>Slab (thick shell)</div>
+    <div class="legend-row"><div class="dot" style="background:#f85149"></div>Pile supports (pinned)</div>
+  </div>
+
+  <div id="canvas-wrap">
+    <div id="loading">
+      <div id="loading-msg">Loading 3D model...</div>
+      <div id="loading-step">Importing Three.js...</div>
+    </div>
+    <canvas id="c"></canvas>
+    <div id="status">Drag to orbit &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Right-drag to pan</div>
+  </div>
+</div>
+
+<script>
+window.onerror = (msg, src, line) => {
+  const el = document.getElementById('loading-step');
+  if (el) el.style.color = '#f85149';
+  if (el) el.textContent = 'JS error: ' + msg + ' (line ' + line + ')';
+};
+</script>
+<script type="module">
+function setStep(msg, isError) {
+  const el = document.getElementById('loading-step');
+  if (el) { el.textContent = msg; el.style.color = isError ? '#f85149' : '#3fb950'; }
+}
+
+let THREE, OrbitControls;
+try {
+  setStep('Importing Three.js...');
+  THREE = await import('three');
+  setStep('Importing OrbitControls...');
+  const ctrl = await import('three/addons/controls/OrbitControls.js');
+  OrbitControls = ctrl.OrbitControls;
+} catch(e) {
+  setStep('CDN import failed: ' + e.message, true);
+  document.getElementById('loading-msg').textContent = 'Three.js failed to load. Check internet connection.';
+  throw e;
+}
+
+const MODEL = {
+  project: { name:"Level-3 Floor", unit_system:"kip_ft", structure_type:"building_floor", designer:"Demo" },
+  grid:    { x_spacings:[20,20,20,20], y_spacings:[25,25,25], origin_x:0, origin_y:0 },
+  girders: { direction:"X", section:{name:"W24x94",section_type:"W24x94",material:"A992"}, row_indices:[0,1,2,3] },
+  beams:   { section:{name:"W18x35",section_type:"W18x35",material:"A992"}, col_indices:[0,1,2,3,4] },
+  piles: (() => {
+    const xs=[0,20,40,60,80], ys=[0,25,50,75], out=[];
+    xs.forEach(x => ys.forEach(y => out.push({x,y,z:0,label:"P"+(out.length+1),restraint:[true,true,true,false,false,false]})));
+    return out;
+  })(),
+  slab:  { thickness:0.667, concrete_fc:0.576, unit_weight:0.15, mesh_size:2.0, material_name:"Concrete_Slab" },
+  loads: { dead_load:0.020, live_load:0.080, moving_load_enabled:false },
+};
+
+async function fetchPreview() {
+  const r = await fetch('/api/preview', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(MODEL)
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setClearColor(0x0d1117);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50000);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const d = new THREE.DirectionalLight(0xffffff, 0.8);
+d.position.set(1, 2, 1.5);
+scene.add(d);
+
+function cylinder(p1, p2, radius, color) {
+  const dir = new THREE.Vector3().subVectors(p2, p1);
+  const len = dir.length();
+  const geo = new THREE.CylinderGeometry(radius, radius, len, 8);
+  const mat = new THREE.MeshPhongMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(p1).addScaledVector(dir.normalize(), len / 2);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  scene.add(mesh);
+}
+
+function drawModel(pv) {
+  const xc = pv.grid.x_coords;
+  const yc = pv.grid.y_coords;
+  const zTop = pv.slab.thickness;
+
+  // Grid reference lines (dim)
+  const gMat = new THREE.LineBasicMaterial({ color: 0x30363d });
+  xc.forEach(x => {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(x, 0, 0), new THREE.Vector3(x, yc[yc.length-1], 0)
+    ]);
+    scene.add(new THREE.Line(g, gMat));
+  });
+  yc.forEach(y => {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, y, 0), new THREE.Vector3(xc[xc.length-1], y, 0)
+    ]);
+    scene.add(new THREE.Line(g, gMat));
+  });
+
+  // Girders (blue)
+  pv.girders.lines.forEach(l => {
+    cylinder(
+      new THREE.Vector3(l.x1, l.y1, zTop),
+      new THREE.Vector3(l.x2, l.y2, zTop),
+      0.28, 0x2f81f7
+    );
+  });
+
+  // Beams (green)
+  pv.beams.lines.forEach(l => {
+    cylinder(
+      new THREE.Vector3(l.x1, l.y1, zTop),
+      new THREE.Vector3(l.x2, l.y2, zTop),
+      0.18, 0x3fb950
+    );
+  });
+
+  // Slab panels (semi-transparent grey)
+  const slabMat = new THREE.MeshPhongMaterial({
+    color: 0x8b949e, transparent: true, opacity: 0.45, side: THREE.DoubleSide
+  });
+  pv.slab.panels.forEach(p => {
+    const w = p.x2 - p.x1, h = p.y2 - p.y1, t = pv.slab.thickness;
+    const geo = new THREE.BoxGeometry(w, h, t);
+    const mesh = new THREE.Mesh(geo, slabMat);
+    mesh.position.set(p.x1 + w / 2, p.y1 + h / 2, t / 2);
+    scene.add(mesh);
+  });
+
+  // Pile supports (red cone + sphere)
+  pv.piles.forEach(p => {
+    const mat = new THREE.MeshPhongMaterial({ color: 0xf85149 });
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.6, 3, 8), mat);
+    cone.position.set(p.x, p.y, -1.5);
+    cone.rotation.x = Math.PI;
+    scene.add(cone);
+    const sph = new THREE.Mesh(new THREE.SphereGeometry(0.7, 8, 8), mat);
+    sph.position.set(p.x, p.y, 0);
+    scene.add(sph);
+  });
+
+  // Fit camera to model
+  const cx = (xc[0] + xc[xc.length-1]) / 2;
+  const cy = (yc[0] + yc[yc.length-1]) / 2;
+  const span = Math.max(xc[xc.length-1] - xc[0], yc[yc.length-1] - yc[0]);
+  camera.position.set(cx + span * 0.9, cy - span * 0.8, span * 0.7);
+  controls.target.set(cx, cy, 0);
+  controls.update();
+}
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+try {
+  setStep('Fetching model from server...');
+  const pv = await fetchPreview();
+  setStep('Rendering...');
+  drawModel(pv);
+  document.getElementById('loading').style.display = 'none';
+} catch(e) {
+  setStep('Failed: ' + e.message, true);
+  document.getElementById('loading-msg').textContent = 'Error loading model';
+}
+</script>
+</body>
+</html>

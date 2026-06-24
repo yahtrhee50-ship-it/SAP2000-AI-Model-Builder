@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAP2000 AI Model Builder</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Top bar ──────────────────────────────────────────────── -->
+  <header id="topbar">
+    <h1>SAP2000 AI Model Builder</h1>
+    <span class="badge">v1.0</span>
+    <div id="sap-status">
+      <div id="sap-dot"></div>
+      <span id="sap-label">SAP2000 not connected</span>
+    </div>
+  </header>
+
+  <!-- ── Left: Input panel ────────────────────────────────────── -->
+  <section id="chat-panel">
+
+    <!-- ── Tab switcher ───────────────────────────────────────── -->
+    <div id="tab-bar">
+      <button class="tab-btn active" data-tab="ai">AI Interview</button>
+      <button class="tab-btn" data-tab="manual">Manual Input</button>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════ -->
+    <!-- TAB 1: AI Interview                                      -->
+    <!-- ════════════════════════════════════════════════════════ -->
+    <div id="tab-ai" class="tab-content active">
+
+      <div id="chat-config">
+        <div class="cfg-row">
+          <div style="flex:1">
+            <label>AI Provider</label>
+            <select id="provider-select">
+              <option value="claude">Claude (Anthropic)</option>
+              <option value="openai">GPT-4o (OpenAI)</option>
+            </select>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <div style="flex:1">
+            <label>API Key</label>
+            <input type="password" id="api-key" placeholder="sk-ant-… or sk-…">
+          </div>
+        </div>
+        <div class="cfg-row">
+          <button class="btn btn-primary" id="start-btn">Start Interview</button>
+          <button class="btn btn-success" id="build-btn-ai" disabled>Build in SAP2000</button>
+        </div>
+        <div id="completion-bar"><div id="completion-fill"></div></div>
+      </div>
+
+      <div id="messages">
+        <div class="msg system">
+          Select an AI provider, enter your API key, then click <strong>Start Interview</strong>.
+          The AI will guide you through all structural input.
+        </div>
+      </div>
+
+      <div id="input-area">
+        <textarea id="msg-input" placeholder="Type your answer… (Enter to send, Shift+Enter for newline)"
+          disabled rows="3"></textarea>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="send-btn" disabled style="flex:1">Send</button>
+        </div>
+      </div>
+
+    </div><!-- #tab-ai -->
+
+    <!-- ════════════════════════════════════════════════════════ -->
+    <!-- TAB 2: Manual Input                                      -->
+    <!-- ════════════════════════════════════════════════════════ -->
+    <div id="tab-manual" class="tab-content">
+      <div id="manual-form-wrap">
+        <form id="manual-form" autocomplete="off">
+
+          <!-- ── Project ───────────────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Project</div>
+            <div class="form-row">
+              <div class="form-field" style="flex:2">
+                <label>Project Name</label>
+                <input type="text" name="project_name" value="My Structure" placeholder="My Bridge">
+              </div>
+              <div class="form-field">
+                <label>Unit System</label>
+                <select name="unit_system">
+                  <option value="kN_m">kN / m (metric)</option>
+                  <option value="kip_ft">kip / ft (imperial)</option>
+                  <option value="kip_in">kip / in (imperial)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-field" style="flex:2">
+                <label>Structure Type</label>
+                <select name="structure_type">
+                  <option value="bridge_deck">Bridge Deck</option>
+                  <option value="building_floor">Building Floor</option>
+                  <option value="mat_foundation">Mat Foundation</option>
+                </select>
+              </div>
+              <div class="form-field" style="flex:2">
+                <label>Designer (optional)</label>
+                <input type="text" name="designer" placeholder="Engineer name">
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Grid ─────────────────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Structural Grid</div>
+            <div class="form-hint">Enter bay spacings separated by commas (e.g. <code>6, 6, 6</code>)</div>
+            <div class="form-row">
+              <div class="form-field" style="flex:1">
+                <label>X-direction bay spacings</label>
+                <input type="text" name="x_spacings" value="6, 6, 6" placeholder="6, 6, 6">
+              </div>
+              <div class="form-field" style="flex:1">
+                <label>Y-direction bay spacings</label>
+                <input type="text" name="y_spacings" value="8, 8" placeholder="8, 8">
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Girders ───────────────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Primary Girders</div>
+            <div class="form-row">
+              <div class="form-field">
+                <label>Direction</label>
+                <select name="girder_direction">
+                  <option value="X">X-direction</option>
+                  <option value="Y">Y-direction</option>
+                </select>
+              </div>
+              <div class="form-field" style="flex:2">
+                <label>Section (W-shape or custom)</label>
+                <input type="text" name="girder_section" value="W610x140" placeholder="W610x140">
+              </div>
+              <div class="form-field">
+                <label>Material</label>
+                <input type="text" name="girder_material" value="A992">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-field" style="flex:1">
+                <label>Grid line indices (0-based, comma-sep)</label>
+                <input type="text" name="girder_rows" value="0, 1, 2" placeholder="0, 1, 2">
+                <span class="form-hint">For X-dir girders: Y grid line numbers. For Y-dir: X grid line numbers.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Secondary Beams ───────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Secondary Beams <span class="optional">(optional)</span></div>
+            <label class="toggle-row">
+              <input type="checkbox" name="beams_enabled" id="beams-toggle"> Include secondary beams
+            </label>
+            <div id="beams-fields" class="collapsible">
+              <div class="form-row">
+                <div class="form-field" style="flex:2">
+                  <label>Section</label>
+                  <input type="text" name="beam_section" value="W460x60" placeholder="W460x60">
+                </div>
+                <div class="form-field">
+                  <label>Material</label>
+                  <input type="text" name="beam_material" value="A992">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-field" style="flex:1">
+                  <label>Grid line indices (comma-sep, perpendicular to girder dir)</label>
+                  <input type="text" name="beam_cols" placeholder="0, 1, 2, 3">
+                  <span class="form-hint">Leave blank to place beams at all grid lines.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Piles / Supports ──────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Pile / Support Locations</div>
+            <div class="form-row" style="align-items:center;gap:8px">
+              <label class="toggle-row" style="flex:1;margin:0">
+                <input type="checkbox" name="piles_at_grid" id="piles-grid-toggle" checked>
+                Place supports at all grid intersections
+              </label>
+            </div>
+            <div id="pile-custom-fields" class="collapsible">
+              <div class="form-hint" style="margin-bottom:8px">Enter one pile per line: <code>X, Y</code> (e.g. <code>0, 0</code>)</div>
+              <textarea name="pile_coords" id="pile-coords" rows="5"
+                placeholder="0, 0&#10;6, 0&#10;12, 0&#10;0, 8&#10;6, 8&#10;12, 8"></textarea>
+            </div>
+            <div class="form-row" style="margin-top:8px">
+              <div class="form-field">
+                <label>Support type</label>
+                <select name="support_type">
+                  <option value="fixed">Fixed (all 6 DOF)</option>
+                  <option value="pinned">Pinned (Ux Uy Uz only)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Concrete Slab ─────────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Concrete Slab (Thick Shell)</div>
+            <div class="form-row">
+              <div class="form-field">
+                <label>Thickness (m or ft)</label>
+                <input type="number" name="slab_thickness" value="0.2" min="0.05" step="0.01">
+              </div>
+              <div class="form-field">
+                <label>Concrete fc (MPa or ksi)</label>
+                <input type="number" name="slab_fc" value="28" min="14" step="1">
+              </div>
+              <div class="form-field">
+                <label>Unit weight (kN/m³ or pcf)</label>
+                <input type="number" name="slab_unit_weight" value="24" min="10" step="0.5">
+              </div>
+              <div class="form-field">
+                <label>Mesh size (m or ft)</label>
+                <input type="number" name="slab_mesh" value="0.5" min="0.1" step="0.1">
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Loads ─────────────────────────────────────── -->
+          <div class="form-section">
+            <div class="form-section-title">Loads</div>
+            <div class="form-row">
+              <div class="form-field">
+                <label>Superimposed Dead Load (kN/m² or psf)</label>
+                <input type="number" name="dead_load" value="2.0" min="0" step="0.5">
+              </div>
+              <div class="form-field">
+                <label>Live Load (kN/m² or psf)</label>
+                <input type="number" name="live_load" value="5.0" min="0" step="0.5">
+              </div>
+            </div>
+            <label class="toggle-row">
+              <input type="checkbox" name="moving_load" id="moving-load-toggle"> Include moving / vehicle load
+            </label>
+            <div id="moving-load-fields" class="collapsible">
+              <div class="form-row">
+                <div class="form-field">
+                  <label>Lane width (m or ft)</label>
+                  <input type="number" name="lane_width" value="3.6" min="2" step="0.1">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Action buttons ────────────────────────────── -->
+          <div class="form-actions">
+            <button type="button" class="btn btn-secondary" id="preview-btn">Update 3D Preview</button>
+            <button type="button" class="btn btn-success" id="build-btn-manual">Build in SAP2000</button>
+          </div>
+
+        </form>
+      </div>
+    </div><!-- #tab-manual -->
+
+  </section>
+
+  <!-- ── Right: 3D Viewer ─────────────────────────────────────── -->
+  <section id="viewer-panel">
+    <div id="viewer-toolbar">
+      <h2>3D Model Preview</h2>
+      <div class="legend">
+        <div class="legend-item"><span class="legend-dot" style="background:#2f81f7"></span> Girder</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#3fb950"></span> Beam</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#8b949e"></span> Slab</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#f85149"></span> Pile/Support</div>
+      </div>
+      <span style="font-size:11px;color:var(--text-muted)">Drag to rotate · Scroll to zoom · Right-drag to pan</span>
+    </div>
+
+    <canvas id="viewer-canvas"></canvas>
+
+    <div id="info-bar">
+      <span style="color:var(--text-muted)">Complete the form or interview to see the model here.</span>
+    </div>
+  </section>
+
+</div><!-- #app -->
+
+<!-- ── Build SAP2000 modal ────────────────────────────────────── -->
+<div id="build-overlay">
+  <div id="build-modal">
+    <h3>Build SAP2000 Model</h3>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
+      This will open SAP2000 (or attach to a running instance) and create the structural model.
+      Make sure SAP2000 is installed and licensed on this machine.
+    </p>
+    <label style="font-size:12px;color:var(--text-muted)">Save file path (optional)</label>
+    <input type="text" id="save-path" placeholder="C:\Projects\MyBridge.sdb" style="margin-bottom:16px">
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="build-modal-close" style="flex:1">Cancel</button>
+      <button class="btn btn-success" id="build-confirm" style="flex:1">Build Model</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
