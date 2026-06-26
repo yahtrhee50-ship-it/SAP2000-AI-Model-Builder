@@ -24,10 +24,29 @@ LOAD_LIVE = 3
 LOAD_VEHICLE = 7
 
 
+def _ret(result) -> int:
+    """Extract the integer error code from a COM return value.
+    comtypes returns [actual_name, retcode] for object-creating calls
+    and a plain int for property-setting calls.
+    """
+    if isinstance(result, (list, tuple)):
+        return int(result[1])
+    return int(result)
+
+
+def _ret_name(result, fallback: str) -> str:
+    """Extract the actual object name SAP2000 assigned (may differ from requested)."""
+    if isinstance(result, (list, tuple)):
+        return str(result[0])
+    return fallback
+
+
 class ModelBuilder:
 
     def __init__(self, conn: SAP2000Connection):
         self._m = conn.model
+        self._steel_mat   = "A992"      # updated by _define_materials
+        self._concrete_mat = "Concrete"  # updated by _define_materials
 
     def build(self, model: StructuralModel) -> dict:
         """Build the full SAP2000 model. Returns a report dict."""
@@ -63,21 +82,25 @@ class ModelBuilder:
         m = self._m
 
         # Steel for beams/girders
+        # SAP2000 may auto-rename 'A992' to 'A992Fy50-1' when ASTM spec is supplied;
+        # capture the actual name so frame sections can reference it correctly.
         ret = m.PropMaterial.AddMaterial("A992", MAT_STEEL, "United States", "ASTM A992", "Grade 50")
-        if ret == 0:
+        if _ret(ret) == 0:
+            self._steel_mat = _ret_name(ret, "A992")
             report["materials"].append("A992 Steel")
 
         # Concrete for slab
         if model.slab:
             name = model.slab.material_name
             ret = m.PropMaterial.AddMaterial(name, MAT_CONCRETE, "", "", "")
-            if ret == 0:
-                fc = model.slab.concrete_fc * 1000  # MPa → kPa for kN-m model
-                # SetMPIsotropic: name, E, u (poisson), A (thermal)
-                E = 4700 * (model.slab.concrete_fc ** 0.5) * 1000  # MPa → kPa
-                m.PropMaterial.SetMPIsotropic(name, E, 0.2, 1.17e-5)
-                m.PropMaterial.SetWeightAndMass(name, 0, model.slab.unit_weight)
-                report["materials"].append(f"Concrete {model.slab.material_name}")
+            if _ret(ret) == 0:
+                actual = _ret_name(ret, name)
+                self._concrete_mat = actual
+                fc = model.slab.concrete_fc * 1000  # MPa -> kPa for kN-m model
+                E = 4700 * (model.slab.concrete_fc ** 0.5) * 1000  # MPa -> kPa
+                m.PropMaterial.SetMPIsotropic(actual, E, 0.2, 1.17e-5)
+                m.PropMaterial.SetWeightAndMass(actual, 0, model.slab.unit_weight)
+                report["materials"].append(f"Concrete {actual}")
 
     # ── Section properties ─────────────────────────────────────────────────────
 
@@ -85,49 +108,48 @@ class ModelBuilder:
         m = self._m
 
         if model.girders:
-            sec = model.girders.section
-            self._add_frame_section(sec, report)
+            self._add_frame_section(model.girders.section, self._steel_mat, report)
 
         if model.beams:
-            sec = model.beams.section
-            self._add_frame_section(sec, report)
+            self._add_frame_section(model.beams.section, self._steel_mat, report)
 
         if model.slab:
             slab = model.slab
-            # Thick shell area property
             # SetShell_1: name, ShellType, IncludeDrillingDOF, MatProp, MatAng, Thickness, Bending
             ret = m.PropArea.SetShell_1(
                 "SlabSection",
                 SHELL_THICK,
                 True,
-                slab.material_name,
+                self._concrete_mat,
                 0.0,
                 slab.thickness,
                 slab.thickness,
             )
-            if ret == 0:
+            if _ret(ret) == 0:
                 report["sections"].append(f"Thick shell slab t={slab.thickness}m")
 
-    def _add_frame_section(self, sec, report: dict) -> None:
+    def _add_frame_section(self, sec, mat_name: str, report: dict) -> None:
         m = self._m
         stype = sec.section_type.upper()
 
-        if stype.startswith("W") and "X" in stype.upper():
-            # Standard W-section — import from catalogue
+        if stype.startswith("W") and "X" in stype:
+            # Standard W-section — import from AISC catalogue
             ret = m.PropFrame.ImportProp(
-                sec.name, sec.material,
+                sec.name, mat_name,
                 "AISC15.xml",
                 stype.replace("X", "x"),
             )
-            if ret != 0:
-                # Fall back to setting from dimensions if import fails
-                log.warning("W-section import failed for %s, using auto", stype)
-                m.PropFrame.SetSD(sec.name, sec.material, 0, 0)
+            if _ret(ret) != 0:
+                # Fallback: rectangular placeholder sized to rough W-section depth/width
+                log.warning("W-section import failed for %s (mat=%s), using rectangle fallback", stype, mat_name)
+                d = sec.depth_mm / 1000 if sec.depth_mm else 0.61
+                b = sec.flange_width_mm / 1000 if sec.flange_width_mm else 0.23
+                m.PropFrame.SetRectangle(sec.name, mat_name, d, b)
         else:
             # Custom rectangular placeholder
             d = sec.depth_mm / 1000 if sec.depth_mm else 0.5
             b = sec.flange_width_mm / 1000 if sec.flange_width_mm else 0.2
-            m.PropFrame.SetRectangle(sec.name, sec.material, d, b)
+            m.PropFrame.SetRectangle(sec.name, mat_name, d, b)
 
         report["sections"].append(sec.name)
 
@@ -148,9 +170,10 @@ class ModelBuilder:
             for j, y in enumerate(yc):
                 name = f"J_{i}_{j}"
                 ret = m.PointObj.AddCartesian(x, y, 0.0, name)
-                if ret[1] == 0:
-                    joints[(x, y)] = name
-                    report["joints"].append(name)
+                if _ret(ret) == 0:
+                    actual = _ret_name(ret, name)
+                    joints[(x, y)] = actual  # actual SAP2000 name for API calls
+                    report["joints"].append(name)  # requested name for report/checks
 
         return joints
 
@@ -162,12 +185,21 @@ class ModelBuilder:
             # Find closest joint
             closest = min(joints.keys(), key=lambda k: (k[0]-pile.x)**2 + (k[1]-pile.y)**2)
             jname = joints[closest]
-            ret = m.PointObj.SetRestraint(jname, pile.restraint)
-            if ret == 0:
-                report["joints"].append(f"Support at {jname}")
+            # comtypes: SetRestraint may raise COMError on failure rather than return non-zero.
+            # Coerce to plain Python list of bools so comtypes can marshal SAFEARRAY(VARIANT_BOOL).
+            dof = [bool(v) for v in pile.restraint]
+            try:
+                ret = m.PointObj.SetRestraint(jname, dof)
+                if ret is None or int(ret) == 0:
+                    report["joints"].append(f"Support at {jname}")
+            except Exception as exc:
+                log.warning("SetRestraint(%s) failed: %s", jname, exc)
 
             if pile.spring_stiffness:
-                m.PointObj.SetSpring(jname, pile.spring_stiffness)
+                try:
+                    m.PointObj.SetSpring(jname, pile.spring_stiffness)
+                except Exception:
+                    pass
 
     # ── Frames ─────────────────────────────────────────────────────────────────
 
@@ -196,8 +228,9 @@ class ModelBuilder:
                         if p1 and p2:
                             name = f"G_X_{ri}_{i}"
                             ret = m.FrameObj.AddByPoint(p1, p2, name)
-                            if ret[1] == 0:
-                                m.FrameObj.SetSection(name, sec_name)
+                            if _ret(ret) == 0:
+                                actual = _ret_name(ret, name)
+                                m.FrameObj.SetSection(actual, sec_name)
                                 report["frames"].append(name)
             else:
                 for ci in row_indices:
@@ -210,8 +243,9 @@ class ModelBuilder:
                         if p1 and p2:
                             name = f"G_Y_{ci}_{j}"
                             ret = m.FrameObj.AddByPoint(p1, p2, name)
-                            if ret[1] == 0:
-                                m.FrameObj.SetSection(name, sec_name)
+                            if _ret(ret) == 0:
+                                actual = _ret_name(ret, name)
+                                m.FrameObj.SetSection(actual, sec_name)
                                 report["frames"].append(name)
 
         # Secondary beams
@@ -232,8 +266,9 @@ class ModelBuilder:
                         if p1 and p2:
                             name = f"B_{ci}_{j}"
                             ret = m.FrameObj.AddByPoint(p1, p2, name)
-                            if ret[1] == 0:
-                                m.FrameObj.SetSection(name, sec_name)
+                            if _ret(ret) == 0:
+                                actual = _ret_name(ret, name)
+                                m.FrameObj.SetSection(actual, sec_name)
                                 report["frames"].append(name)
             else:
                 # Beams run X-direction
@@ -247,8 +282,9 @@ class ModelBuilder:
                         if p1 and p2:
                             name = f"B_{ri}_{i}"
                             ret = m.FrameObj.AddByPoint(p1, p2, name)
-                            if ret[1] == 0:
-                                m.FrameObj.SetSection(name, sec_name)
+                            if _ret(ret) == 0:
+                                actual = _ret_name(ret, name)
+                                m.FrameObj.SetSection(actual, sec_name)
                                 report["frames"].append(name)
 
     # ── Slab ──────────────────────────────────────────────────────────────────
@@ -287,18 +323,24 @@ class ModelBuilder:
                             [cx1, cy1, 0.0],
                             [cx0, cy1, 0.0],
                         ]
-                        # Add joints for each corner
+                        # Add joints for each corner; use actual names SAP2000 assigns
                         jnames = []
                         for px, py, pz in pts:
                             jname = f"SJ_{round(px*1000)}_{round(py*1000)}"
-                            m.PointObj.AddCartesian(px, py, pz, jname)
-                            jnames.append(jname)
+                            r = m.PointObj.AddCartesian(px, py, pz, jname)
+                            jnames.append(_ret_name(r, jname))
 
                         area_name = f"S_{i}_{j}_{ix}_{iy}"
-                        ret = m.AreaObj.AddByPoint(4, jnames, area_name)
-                        if ret[1] == 0:
-                            m.AreaObj.SetProperty(area_name, "SlabSection")
-                            report["areas"].append(area_name)
+                        # comtypes: pass a plain list of str so SAFEARRAY(BSTR) marshals correctly.
+                        # On success returns (actual_name, 0); on failure raises COMError.
+                        try:
+                            ret = m.AreaObj.AddByPoint(4, [str(j) for j in jnames], area_name)
+                            if _ret(ret) == 0:
+                                actual_area = _ret_name(ret, area_name)
+                                m.AreaObj.SetProperty(actual_area, "SlabSection")
+                                report["areas"].append(actual_area)
+                        except Exception as exc:
+                            log.warning("AreaObj.AddByPoint(%s) failed: %s", area_name, exc)
 
     # ── Loads ─────────────────────────────────────────────────────────────────
 

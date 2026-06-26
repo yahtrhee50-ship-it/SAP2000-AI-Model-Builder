@@ -1,6 +1,10 @@
 """
 SAP2000 COM connection manager.
 Connects to a running SAP2000 instance or starts a new one.
+
+Uses comtypes (not pywin32) because cSapModel exposes only a vtable interface
+and does not support IDispatch — pywin32 raises E_NOINTERFACE on SapModel.
+comtypes reads the registered typelib and generates proper vtable wrappers.
 """
 from __future__ import annotations
 import logging
@@ -17,7 +21,10 @@ UNIT_CODES = {
     "kip_in": 3,   # kip, in, F
 }
 
-_SAP_PROGID = "CSI.SAP2000.API.SapObject"
+_SAP_PROGID   = "CSI.SAP2000.API.SapObject"
+_SAP_CLSID    = "{B6B21850-FB75-41DE-85EC-BC9DBEC69BD3}"
+# CSi Application Programming Interface (API) v1 typelib
+_TYPELIB_GUID = "{F896D55D-8BDF-4232-B9AB-4B210897A81D}"
 
 
 def _find_sap2000_exe() -> str | None:
@@ -32,7 +39,6 @@ def _find_sap2000_exe() -> str | None:
                     k2 = winreg.OpenKey(hive, rf"{sub}\{clsid}\LocalServer32")
                     exe = winreg.QueryValue(k2, "")
                     winreg.CloseKey(k2)
-                    # Strip any quoted path or trailing flags
                     exe = exe.strip('"').split('"')[0].strip()
                     return exe
                 except OSError:
@@ -42,8 +48,14 @@ def _find_sap2000_exe() -> str | None:
     return None
 
 
+def _get_sap_lib():
+    """Generate (or load cached) comtypes wrappers from the SAP2000 typelib."""
+    import comtypes.client
+    return comtypes.client.GetModule((_TYPELIB_GUID, 1, 0))
+
+
 class SAP2000Connection:
-    """Wraps the SAP2000 COM SapObject."""
+    """Wraps the SAP2000 COM SapObject via comtypes vtable interface."""
 
     def __init__(self):
         self._sap_obj = None
@@ -59,45 +71,40 @@ class SAP2000Connection:
         """Attach to a running SAP2000 instance or launch a new one."""
         try:
             import pythoncom
-            import win32com.client as win32
+            import comtypes
+            import comtypes.client
             pythoncom.CoInitialize()
-        except ImportError:
-            raise RuntimeError("pywin32 is required for SAP2000 integration.")
+        except ImportError as e:
+            raise RuntimeError(f"Required COM library missing: {e}. Install with: pip install comtypes pywin32")
+
+        lib  = _get_sap_lib()
+        clsid = comtypes.GUID(_SAP_CLSID)
 
         # 1. Try to attach to a SAP2000 that is already running
         try:
-            self._sap_obj = win32.GetActiveObject(_SAP_PROGID)
+            self._sap_obj = comtypes.client.GetActiveObject(clsid, interface=lib.cOAPI)
             log.info("Attached to running SAP2000 instance.")
             self._model = self._sap_obj.SapModel
             return
         except Exception:
             pass
 
-        # 2. Find the exe and launch it directly (avoids the -Embedding dialog)
-        exe = _find_sap2000_exe()
-        if not exe:
-            raise RuntimeError(
-                "SAP2000 is not installed or its COM registration is missing."
-            )
+        # 2. Use SAP2000v1.Helper to create and start a new instance.
+        #    This is the confirmed-working launch pattern (established in Project_003).
+        #    GetModule already imported comtypes.gen.SAP2000v1 as a side effect above.
+        import comtypes.gen.SAP2000v1 as _sap_gen  # type: ignore[import]
 
-        log.info("Launching SAP2000 from: %s", exe)
-        subprocess.Popen([exe])
+        exe = _find_sap2000_exe() or r"D:\CSI\SAP2000.exe"
+        log.info("Launching SAP2000 via Helper from: %s", exe)
 
-        # 3. Poll until SAP2000 registers itself in the COM Running Object Table
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            time.sleep(2)
-            try:
-                self._sap_obj = win32.GetActiveObject(_SAP_PROGID)
-                log.info("SAP2000 COM server ready.")
-                break
-            except Exception:
-                continue
-        else:
-            raise RuntimeError(
-                "SAP2000 launched but did not register as a COM server within 60 s. "
-                "Try opening SAP2000 manually first."
-            )
+        helper = comtypes.client.CreateObject("SAP2000v1.Helper")
+        helper = helper.QueryInterface(_sap_gen.cHelper)
+        self._sap_obj = helper.CreateObject(exe)
+        self._sap_obj.ApplicationStart()
+        try:
+            self._sap_obj.Visible = True
+        except Exception:
+            pass
 
         self._model = self._sap_obj.SapModel
 

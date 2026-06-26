@@ -1,5 +1,18 @@
 # SAP2000 AI Model Builder — Claude Instructions
 
+## Agent Rules (from AGENTS.md)
+
+- Keep all work inside this project folder unless explicitly approved otherwise.
+- Do not create, modify, move, or delete files outside this project folder without approval.
+- Do not say a task or project is complete until the relevant files and logic have been verified.
+- Do not mark any test, validation, or verification item as passed unless it was actually run or directly confirmed by the user.
+- Do not claim integration tests passed unless a real integration test was actually run.
+- Do not claim unit tests passed unless a real unit test was actually run.
+- If only a syntax check was run, describe it as a syntax check — not a full test suite.
+- If the user manually verifies behavior in a real browser or app, record that as manual verification.
+- Tell the user what files changed.
+- If making assumptions, state them clearly.
+
 ## Git & GitHub
 
 **Always use Git and GitHub for this project.**
@@ -8,22 +21,23 @@ After completing any task that changes files:
 1. Stage the changed files by name (`git add <file> ...`)
 2. Write a clean, descriptive commit message (what changed and why)
 3. Commit locally
-4. Push to GitHub (`git push origin main`)
+4. Push to GitHub (`git push origin master`)
 
 The goal is to always have a saved version on GitHub so we can revert if needed.
 
 **Tool paths (Git is on the D drive):**
 - Run `where git` before any git operations to confirm the path
-- If `git` is not in PATH, use `D:\Git\bin\git.exe` (or wherever `where git` resolves)
-- GitHub CLI (`gh`) may also be on the D drive — check with `where gh`
+- If `git` is not in PATH, use `D:\AI_TEST\GIT\Git\cmd\git.exe`
+- GitHub CLI (`gh`): `C:\Program Files\GitHub CLI\gh.exe` — check with `where gh`
+- Remote branch is `master` (not `main`)
 
 ## Environment
 
 - OS: Windows 11, PowerShell primary shell
 - Python: `C:\Python314\python.exe`
 - SAP2000: installed at `D:\CSI\SAP2000.exe`, ProgID `CSI.SAP2000.API.SapObject`
-- Git: installed on the D drive (not the default C:\Program Files location)
-- GitHub CLI (`gh`): may be on the D drive — verify path before use
+- Git: `D:\AI_TEST\GIT\Git\cmd\git.exe`
+- GitHub CLI (`gh`): `C:\Program Files\GitHub CLI\gh.exe`
 
 ## Testing
 
@@ -39,16 +53,44 @@ python scripts\imperial_test.py
 
 Both must pass (0 failures, 0 warnings) before committing.
 
-## SAP2000 COM API — Known Issues
+## SAP2000 COM API — Known Issues & Confirmed Patterns
 
-- **`SapModel` returns `E_NOINTERFACE`**: Persistent issue with pywin32 late binding. Root cause not yet resolved.
-  - `GetOAPIVersionNumber()` and `Visible` work fine — the COM object IS connected.
-  - `SapModel` property specifically fails regardless of apartment type (STA/MTA) or gencache state.
-  - Next steps to investigate: check SAP2000 license activation, try running server as Administrator, check if SAP2000 API requires a specific version of pywin32.
+### RESOLVED: Use `SAP2000v1.Helper` to launch and connect (confirmed working in Project_003)
 
-- **`-Embedding` dialog on COM launch**: When `win32.Dispatch("CSI.SAP2000.API.SapObject")` is called, SAP2000 shows "File -Embedding not found! Command line data ignored." — dismiss with OK. Connector now launches SAP2000 directly via subprocess to avoid this.
+The correct way to launch SAP2000 and get a working `SapModel` is:
 
-- **Blocking event loop**: All SAP2000 COM calls must run in `asyncio.to_thread()` with `pythoncom.CoInitialize()` called at the start of the thread function. Never call COM directly in an async route.
+```python
+import comtypes.client
+import comtypes.gen
+
+# Load typelib first so comtypes.gen.SAP2000v1 is available
+comtypes.client.GetModule(("{F896D55D-8BDF-4232-B9AB-4B210897A81D}", 1, 0))
+
+helper = comtypes.client.CreateObject("SAP2000v1.Helper")
+helper = helper.QueryInterface(comtypes.gen.SAP2000v1.cHelper)
+sap_object = helper.CreateObject(r"D:\CSI\SAP2000.exe")
+sap_object.ApplicationStart()
+sap_model = sap_object.SapModel   # works reliably
+```
+
+Do NOT use `win32.Dispatch("CSI.SAP2000.API.SapObject")` — it launches with `-Embedding` and `SapModel` returns `E_NOINTERFACE`.
+
+To attach to an already-running SAP2000 (avoid relaunching):
+```python
+clsid = comtypes.GUID("{B6B21850-FB75-41DE-85EC-BC9DBEC69BD3}")
+lib = comtypes.client.GetModule(("{F896D55D-8BDF-4232-B9AB-4B210897A81D}", 1, 0))
+sap_object = comtypes.client.GetActiveObject(clsid, interface=lib.cOAPI)
+sap_model = sap_object.SapModel
+```
+
+### Blocking event loop
+All SAP2000 COM calls must run in `asyncio.to_thread()` with `pythoncom.CoInitialize()` called at the start of the thread function. Never call COM directly in an async route.
+
+### comtypes return value conventions
+- Successful calls return `0` (integer) or raise `COMError` on failure.
+- `AddByPoint`-style calls return `(actual_name, error_code)` — use `_ret()` / `_ret_name()` helpers.
+- For SAFEARRAY arguments (boolean lists, string lists), pass plain Python lists — comtypes marshals them automatically via the typelib.
+- Wrap COM calls in try/except as the primary failure path; fall back to return-code check.
 
 ## Project Structure
 
