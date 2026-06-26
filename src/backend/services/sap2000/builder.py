@@ -26,18 +26,27 @@ LOAD_VEHICLE = 7
 
 def _ret(result) -> int:
     """Extract the integer error code from a COM return value.
-    comtypes returns [actual_name, retcode] for object-creating calls
-    and a plain int for property-setting calls.
+
+    comtypes vtable returns vary by call:
+      2-element: [name_or_echo, retcode]          e.g. AddCartesian, SetRestraint
+      3-element: [input_echo, actual_name, retcode] e.g. AreaObj.AddByPoint
+    The error code is always the LAST element.
     """
     if isinstance(result, (list, tuple)):
-        return int(result[1])
+        return int(result[-1])
+    if result is None:
+        return 0
     return int(result)
 
 
 def _ret_name(result, fallback: str) -> str:
-    """Extract the actual object name SAP2000 assigned (may differ from requested)."""
-    if isinstance(result, (list, tuple)):
-        return str(result[0])
+    """Extract the actual object name SAP2000 assigned (may differ from requested).
+
+    The assigned name is the second-to-last element in the return list,
+    which works for both 2-element [name, retcode] and 3-element [echo, name, retcode].
+    """
+    if isinstance(result, (list, tuple)) and len(result) >= 2:
+        return str(result[-2])
     return fallback
 
 
@@ -190,7 +199,7 @@ class ModelBuilder:
             dof = [bool(v) for v in pile.restraint]
             try:
                 ret = m.PointObj.SetRestraint(jname, dof)
-                if ret is None or int(ret) == 0:
+                if _ret(ret) == 0:
                     report["joints"].append(f"Support at {jname}")
             except Exception as exc:
                 log.warning("SetRestraint(%s) failed: %s", jname, exc)

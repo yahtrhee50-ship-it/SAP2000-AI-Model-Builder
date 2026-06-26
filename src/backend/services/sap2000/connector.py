@@ -90,15 +90,19 @@ class SAP2000Connection:
             pass
 
         # 2. Use SAP2000v1.Helper to create and start a new instance.
-        #    This is the confirmed-working launch pattern (established in Project_003).
-        #    GetModule already imported comtypes.gen.SAP2000v1 as a side effect above.
-        import comtypes.gen.SAP2000v1 as _sap_gen  # type: ignore[import]
-
+        #    Confirmed-working launch pattern from Project_003.
+        #    Try QI to cHelper for typed vtable access; if that fails (interface not
+        #    exposed on this installation), call CreateObject on the raw helper.
         exe = _find_sap2000_exe() or r"D:\CSI\SAP2000.exe"
         log.info("Launching SAP2000 via Helper from: %s", exe)
 
         helper = comtypes.client.CreateObject("SAP2000v1.Helper")
-        helper = helper.QueryInterface(_sap_gen.cHelper)
+        try:
+            helper = helper.QueryInterface(lib.cHelper)
+            log.info("Helper QI to cHelper succeeded.")
+        except Exception as qi_exc:
+            log.warning("cHelper QI failed (%s) — using raw helper.", qi_exc)
+
         self._sap_obj = helper.CreateObject(exe)
         self._sap_obj.ApplicationStart()
         try:
