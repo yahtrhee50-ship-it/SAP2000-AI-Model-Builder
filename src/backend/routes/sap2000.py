@@ -104,6 +104,25 @@ async def build_from_json(model_data: dict):
         raise HTTPException(500, f"Build failed: {exc}")
 
 
+@router.post("/close")
+async def close_sap2000():
+    """Close SAP2000 cleanly via ApplicationExit. Preferred over task-killing."""
+    def _close():
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except Exception:
+            pass
+        conn = get_connection()
+        conn.close(save=False)
+        return {"status": "closed"}
+
+    try:
+        return await asyncio.to_thread(_close)
+    except Exception as exc:
+        raise HTTPException(500, f"SAP2000 close failed: {exc}")
+
+
 @router.get("/status")
 async def sap2000_status():
     """Check whether SAP2000 is connected."""
