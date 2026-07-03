@@ -23,6 +23,31 @@ LOAD_DEAD = 1
 LOAD_LIVE = 3
 LOAD_VEHICLE = 7
 
+# Model input convention per unit system (values in StructuralModel must already
+# be in these units — the interview prompt instructs the AI to convert):
+#   kN_m:   length m,  fc MPa, unit weight kN/m3,  area loads kN/m2
+#   kip_ft: length ft, fc ksi, unit weight kip/ft3, area loads ksf
+#   kip_in: length in, fc ksi, unit weight kip/in3, area loads kip/in2
+UNIT_INFO = {
+    "kN_m":   {"len": "m",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5},
+    "kip_ft": {"len": "ft", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6},
+    "kip_in": {"len": "in", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6},
+}
+
+
+def _concrete_E(fc: float, unit_system: str) -> float:
+    """Concrete modulus of elasticity in the model's stress units.
+
+    kN_m:   ACI 318 metric  Ec = 4700*sqrt(fc MPa) MPa  -> kPa
+    kip_ft: ACI 318         Ec = 57000*sqrt(fc psi) psi = 1802.5*sqrt(fc ksi) ksi -> ksf
+    kip_in: same formula, kept in ksi
+    """
+    if unit_system == "kip_ft":
+        return 1802.5 * (fc ** 0.5) * 144.0
+    if unit_system == "kip_in":
+        return 1802.5 * (fc ** 0.5)
+    return 4700.0 * (fc ** 0.5) * 1000.0
+
 
 def _ret(result) -> int:
     """Extract the integer error code from a COM return value.
@@ -56,6 +81,7 @@ class ModelBuilder:
         self._m = conn.model
         self._steel_mat   = "A992"      # updated by _define_materials
         self._concrete_mat = "Concrete"  # updated by _define_materials
+        self._units = "kN_m"             # updated by build()
 
     def build(self, model: StructuralModel) -> dict:
         """Build the full SAP2000 model. Returns a report dict."""
@@ -68,6 +94,7 @@ class ModelBuilder:
             "loads": [],
             "errors": [],
         }
+        self._units = model.project.unit_system.value
 
         try:
             self._define_materials(model, report)
@@ -98,18 +125,24 @@ class ModelBuilder:
             self._steel_mat = _ret_name(ret, "A992")
             report["materials"].append("A992 Steel")
 
-        # Concrete for slab
+        # Concrete for slab.
+        # SetMaterial (not AddMaterial) — AddMaterial requires a valid region/standard/
+        # grade and fails with empty strings, leaving the slab with no concrete material.
         if model.slab:
             name = model.slab.material_name
-            ret = m.PropMaterial.AddMaterial(name, MAT_CONCRETE, "", "", "")
-            if _ret(ret) == 0:
-                actual = _ret_name(ret, name)
-                self._concrete_mat = actual
-                fc = model.slab.concrete_fc * 1000  # MPa -> kPa for kN-m model
-                E = 4700 * (model.slab.concrete_fc ** 0.5) * 1000  # MPa -> kPa
-                m.PropMaterial.SetMPIsotropic(actual, E, 0.2, 1.17e-5)
-                m.PropMaterial.SetWeightAndMass(actual, 0, model.slab.unit_weight)
-                report["materials"].append(f"Concrete {actual}")
+            ret = m.PropMaterial.SetMaterial(name, MAT_CONCRETE)
+            if _ret(ret) != 0:
+                report["errors"].append(f"Failed to create concrete material '{name}'")
+                return
+            self._concrete_mat = name
+            info = UNIT_INFO[self._units]
+            E = _concrete_E(model.slab.concrete_fc, self._units)
+            if _ret(m.PropMaterial.SetMPIsotropic(name, E, 0.2, info["thermal"])) != 0:
+                report["errors"].append(f"Failed to set concrete stiffness on '{name}'")
+            # Option 1 = weight per unit volume (0 is not a valid option code)
+            if _ret(m.PropMaterial.SetWeightAndMass(name, 1, model.slab.unit_weight)) != 0:
+                report["errors"].append(f"Failed to set concrete unit weight on '{name}'")
+            report["materials"].append(f"Concrete {name} (E={E:.0f} {info['press']})")
 
     # ── Section properties ─────────────────────────────────────────────────────
 
@@ -135,11 +168,17 @@ class ModelBuilder:
                 slab.thickness,
             )
             if _ret(ret) == 0:
-                report["sections"].append(f"Thick shell slab t={slab.thickness}m")
+                report["sections"].append(
+                    f"Thick shell slab t={slab.thickness}{UNIT_INFO[self._units]['len']}"
+                )
+            else:
+                report["errors"].append("Failed to define slab shell section")
 
     def _add_frame_section(self, sec, mat_name: str, report: dict) -> None:
         m = self._m
         stype = sec.section_type.upper()
+
+        mm = UNIT_INFO[self._units]["mm_to_len"]  # mm -> model length units
 
         if stype.startswith("W") and "X" in stype:
             # Standard W-section — import from AISC catalogue
@@ -151,13 +190,13 @@ class ModelBuilder:
             if _ret(ret) != 0:
                 # Fallback: rectangular placeholder sized to rough W-section depth/width
                 log.warning("W-section import failed for %s (mat=%s), using rectangle fallback", stype, mat_name)
-                d = sec.depth_mm / 1000 if sec.depth_mm else 0.61
-                b = sec.flange_width_mm / 1000 if sec.flange_width_mm else 0.23
+                d = sec.depth_mm * mm if sec.depth_mm else 610 * mm
+                b = sec.flange_width_mm * mm if sec.flange_width_mm else 230 * mm
                 m.PropFrame.SetRectangle(sec.name, mat_name, d, b)
         else:
             # Custom rectangular placeholder
-            d = sec.depth_mm / 1000 if sec.depth_mm else 0.5
-            b = sec.flange_width_mm / 1000 if sec.flange_width_mm else 0.2
+            d = sec.depth_mm * mm if sec.depth_mm else 500 * mm
+            b = sec.flange_width_mm * mm if sec.flange_width_mm else 200 * mm
             m.PropFrame.SetRectangle(sec.name, mat_name, d, b)
 
         report["sections"].append(sec.name)
@@ -372,9 +411,11 @@ class ModelBuilder:
         if ld.moving_load_enabled:
             m.LoadPatterns.Add("ML", LOAD_VEHICLE, 0.0, False)
 
+        press = UNIT_INFO[self._units]["press"]
         report["loads"].append(
-            "Patterns: DEAD (SW x1.0), SDL=%.2f kN/m2, LL=%.2f kN/m2%s"
-            % (ld.dead_load, ld.live_load, ", ML" if ld.moving_load_enabled else "")
+            "Patterns: DEAD (SW x1.0), SDL=%.4g %s, LL=%.4g %s%s"
+            % (ld.dead_load, press, ld.live_load, press,
+               ", ML" if ld.moving_load_enabled else "")
         )
 
     def _assign_area_loads(self, model: StructuralModel, report: dict) -> None:
@@ -385,18 +426,26 @@ class ModelBuilder:
         m  = self._m
         ld = model.loads
 
-        # LoadDir=6 = Local Z (gravity direction for horizontal slabs)
-        # Replace=True so loads don't stack on re-runs
+        # LoadDir=6 = Gravity direction (Global -Z). Dir 6 is only valid with the
+        # Global CSys — with CSys="Local" SAP2000 rejects the call (local dirs are 1-3),
+        # so loads were silently dropped before this was fixed.
+        # Replace=True so loads don't stack on re-runs.
+        failed = 0
         for area_name in report["areas"]:
             if ld.dead_load > 0:
-                m.AreaObj.SetLoadUniform(area_name, "SDL", -ld.dead_load, 6, True, "Local")
+                if _ret(m.AreaObj.SetLoadUniform(area_name, "SDL", -ld.dead_load, 6, True, "Global")) != 0:
+                    failed += 1
             if ld.live_load > 0:
-                m.AreaObj.SetLoadUniform(area_name, "LL",  -ld.live_load,  6, True, "Local")
+                if _ret(m.AreaObj.SetLoadUniform(area_name, "LL", -ld.live_load, 6, True, "Global")) != 0:
+                    failed += 1
 
+        if failed:
+            report["errors"].append(f"{failed} area load assignments failed")
         if report["areas"]:
+            press = UNIT_INFO[self._units]["press"]
             report["loads"].append(
-                "SDL %.2f kN/m2 and LL %.2f kN/m2 applied to %d area elements"
-                % (ld.dead_load, ld.live_load, len(report["areas"]))
+                "SDL %.4g %s and LL %.4g %s applied to %d area elements"
+                % (ld.dead_load, press, ld.live_load, press, len(report["areas"]))
             )
 
     def _refresh_view(self) -> None:

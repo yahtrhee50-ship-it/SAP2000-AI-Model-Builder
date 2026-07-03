@@ -73,16 +73,16 @@ class PileSupport(BaseModel):
 
 
 class SlabDefinition(BaseModel):
-    thickness: float = Field(..., description="Slab thickness (m or ft)")
-    concrete_fc: float = Field(28.0, description="Concrete compressive strength MPa")
-    unit_weight: float = Field(24.0, description="Concrete unit weight kN/m³")
+    thickness: float = Field(..., description="Slab thickness in model length units (m or ft)")
+    concrete_fc: float = Field(28.0, description="Concrete compressive strength (MPa metric / ksi imperial)")
+    unit_weight: float = Field(24.0, description="Concrete unit weight in model units (kN/m³ metric / kip/ft³ imperial)")
     mesh_size: float = Field(0.5, description="Target mesh element size (m or ft)")
     material_name: str = "Concrete_Slab"
 
 
 class LoadDefinition(BaseModel):
-    dead_load: float = Field(0.0, description="Superimposed dead load (kN/m²)")
-    live_load: float = Field(0.0, description="Live load (kN/m²)")
+    dead_load: float = Field(0.0, description="Superimposed dead load in model units (kN/m² metric / ksf imperial)")
+    live_load: float = Field(0.0, description="Live load in model units (kN/m² metric / ksf imperial)")
     moving_load_enabled: bool = False
     lane_width: Optional[float] = None
     truck_axle_loads: Optional[list[float]] = None
