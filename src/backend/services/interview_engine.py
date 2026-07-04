@@ -57,7 +57,11 @@ Your job is to conduct a friendly, efficient interview to collect all required p
 - Superimposed dead load (kN/m² or psf)
 - Live load (kN/m² or psf)
 - Moving load: yes or no
-  - If yes: lane width, truck type (HL-93, HS20, custom), or manual axle loads and spacings
+  - If yes: lane width and truck type. Supported truck types (SAP2000 standard
+    vehicle library): P5, P7, P9, P11, P13 (Caltrans permit trucks — P13 is the
+    default), HL-93 (AASHTO LRFD design envelope), HL-93K/M/S individually,
+    HS20, HS15. Custom axle loads/spacings are not supported yet — if the user
+    needs one, note it for the engineer and use the closest standard vehicle.
 
 ## Unit convention for the JSON (IMPORTANT):
 All numeric values in the output JSON must be in the model's consistent unit system.
@@ -123,6 +127,7 @@ Echo the converted value back to the user when confirming (e.g. "80 psf = 0.080 
     "live_load": 5.0,
     "moving_load_enabled": false,
     "lane_width": null,
+    "truck_type": null,
     "truck_axle_loads": null,
     "truck_axle_spacings": null
   }
@@ -225,6 +230,7 @@ def _parse_model(data: dict) -> StructuralModel:
             live_load=ld.get("live_load", 0.0),
             moving_load_enabled=ld.get("moving_load_enabled", False),
             lane_width=ld.get("lane_width"),
+            truck_type=ld.get("truck_type"),
             truck_axle_loads=ld.get("truck_axle_loads"),
             truck_axle_spacings=ld.get("truck_axle_spacings"),
         )

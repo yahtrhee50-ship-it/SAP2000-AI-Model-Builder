@@ -84,7 +84,12 @@ class LoadDefinition(BaseModel):
     dead_load: float = Field(0.0, description="Superimposed dead load in model units (kN/m² metric / ksf imperial)")
     live_load: float = Field(0.0, description="Live load in model units (kN/m² metric / ksf imperial)")
     moving_load_enabled: bool = False
-    lane_width: Optional[float] = None
+    lane_width: Optional[float] = Field(None, description="Traffic lane width in model length units (default 3.6 m / 12 ft)")
+    truck_type: Optional[str] = Field(
+        None,
+        description="SAP2000 standard vehicle: P5/P7/P9/P11/P13 (Caltrans permit), "
+                    "HL-93, HL-93K/M/S, HS20, HS15. Default P13.",
+    )
     truck_axle_loads: Optional[list[float]] = None
     truck_axle_spacings: Optional[list[float]] = None
 

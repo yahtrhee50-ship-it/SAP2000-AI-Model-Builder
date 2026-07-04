@@ -18,10 +18,32 @@ SHELL_THIN = 1
 SHELL_THICK = 2     # thick plate (includes shear deformation)
 SHELL_MEMBRANE = 3
 
-# Load pattern type codes
+# Load pattern type codes (eLoadPatternType)
 LOAD_DEAD = 1
 LOAD_LIVE = 3
-LOAD_VEHICLE = 7
+
+# Standard vehicles from SAP2000's built-in library, selected by truck_type.
+# Each entry: list of (VehName, Type, ScaleFactor) rows for the
+# "Vehicles 1 - Standard Vehicles" database table. For HSn-44 the scale factor
+# is the "n" (HS20-44 = HSn-44 with SF 20). Axle weights/spacings come from
+# SAP2000's vehicle library — verify against the current Caltrans BDA / AASHTO
+# source before using results in final calculations.
+STANDARD_TRUCKS = {
+    "P5":     [("P5", "P5", "1")],
+    "P7":     [("P7", "P7", "1")],
+    "P9":     [("P9", "P9", "1")],
+    "P11":    [("P11", "P11", "1")],
+    "P13":    [("P13", "P13", "1")],
+    "HL-93":  [("HL-93K", "HL-93K", "1"), ("HL-93M", "HL-93M", "1"),
+               ("HL-93S", "HL-93S", "1")],
+    "HL-93K": [("HL-93K", "HL-93K", "1")],
+    "HL-93M": [("HL-93M", "HL-93M", "1")],
+    "HL-93S": [("HL-93S", "HL-93S", "1")],
+    "HS20":   [("HS20-44", "HSn-44", "20")],
+    "HS20-44": [("HS20-44", "HSn-44", "20")],
+    "HS15":   [("HS15-44", "HSn-44", "15")],
+}
+DEFAULT_TRUCK = "P13"  # typical Caltrans permit truck
 
 # Model input convention per unit system (values in StructuralModel must already
 # be in these units — the interview prompt instructs the AI to convert):
@@ -29,9 +51,9 @@ LOAD_VEHICLE = 7
 #   kip_ft: length ft, fc ksi, unit weight kip/ft3, area loads ksf
 #   kip_in: length in, fc ksi, unit weight kip/in3, area loads kip/in2
 UNIT_INFO = {
-    "kN_m":   {"len": "m",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5},
-    "kip_ft": {"len": "ft", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6},
-    "kip_in": {"len": "in", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6},
+    "kN_m":   {"len": "m",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5, "lane_width": 3.6},
+    "kip_ft": {"len": "ft", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6,  "lane_width": 12.0},
+    "kip_in": {"len": "in", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6,  "lane_width": 144.0},
 }
 
 
@@ -82,6 +104,9 @@ class ModelBuilder:
         self._steel_mat   = "A992"      # updated by _define_materials
         self._concrete_mat = "Concrete"  # updated by _define_materials
         self._units = "kN_m"             # updated by build()
+        # {girder row index: [(start_coord, actual_frame_name), ...]} — filled by
+        # _add_frames, consumed by _define_moving_load for lane definition
+        self._girder_rows: dict[int, list[tuple[float, str]]] = {}
 
     def build(self, model: StructuralModel) -> dict:
         """Build the full SAP2000 model. Returns a report dict."""
@@ -105,6 +130,7 @@ class ModelBuilder:
             self._add_slab(model, report)
             self._define_loads(model, report)
             self._assign_area_loads(model, report)
+            self._define_moving_load(model, report)
             self._refresh_view()
         except Exception as exc:
             report["errors"].append(str(exc))
@@ -280,6 +306,7 @@ class ModelBuilder:
                                 actual = _ret_name(ret, name)
                                 m.FrameObj.SetSection(actual, sec_name)
                                 report["frames"].append(name)
+                                self._girder_rows.setdefault(ri, []).append((xc[i], actual))
             else:
                 for ci in row_indices:
                     if ci >= len(xc):
@@ -295,6 +322,7 @@ class ModelBuilder:
                                 actual = _ret_name(ret, name)
                                 m.FrameObj.SetSection(actual, sec_name)
                                 report["frames"].append(name)
+                                self._girder_rows.setdefault(ci, []).append((yc[j], actual))
 
         # Secondary beams
         if model.beams:
@@ -408,14 +436,10 @@ class ModelBuilder:
         # Live load pattern
         m.LoadPatterns.Add("LL", LOAD_LIVE, 0.0, False)
 
-        if ld.moving_load_enabled:
-            m.LoadPatterns.Add("ML", LOAD_VEHICLE, 0.0, False)
-
         press = UNIT_INFO[self._units]["press"]
         report["loads"].append(
-            "Patterns: DEAD (SW x1.0), SDL=%.4g %s, LL=%.4g %s%s"
-            % (ld.dead_load, press, ld.live_load, press,
-               ", ML" if ld.moving_load_enabled else "")
+            "Patterns: DEAD (SW x1.0), SDL=%.4g %s, LL=%.4g %s"
+            % (ld.dead_load, press, ld.live_load, press)
         )
 
     def _assign_area_loads(self, model: StructuralModel, report: dict) -> None:
@@ -447,6 +471,136 @@ class ModelBuilder:
                 "SDL %.4g %s and LL %.4g %s applied to %d area elements"
                 % (ld.dead_load, press, ld.live_load, press, len(report["areas"]))
             )
+
+    # ── Moving load (lane + standard vehicle + moving load case) ──────────────
+    #
+    # The BridgeModeler_1 COM interfaces (Lane/Vehicle/VehicleClass) return -100
+    # on this installation, so lanes and vehicles are created through the
+    # interactive database tables instead (DatabaseTables.SetTableForEditingArray
+    # + ApplyEditedTables), which works on a plain frame/shell model. The moving
+    # load CASE itself uses the documented classic API (LoadCases.Moving.*),
+    # which works once lanes and vehicle classes exist.
+
+    def _edit_table(self, key: str, fields: list[str], rows: list[list[str]]) -> int:
+        flat = [str(c) for row in rows for c in row]
+        ret = self._m.DatabaseTables.SetTableForEditingArray(key, 1, fields, len(rows), flat)
+        return _ret(ret)
+
+    def _class_exists(self, name: str) -> bool:
+        try:
+            r = self._m.DatabaseTables.GetTableForDisplayArray(
+                "Vehicles 4 - Vehicle Classes", [], "", 0, [], 0, [])
+            return name in list(r[4] or ())
+        except Exception:
+            return False
+
+    def _apply_tables(self, report: dict, what: str) -> bool:
+        r = self._m.DatabaseTables.ApplyEditedTables(True, 0, 0, 0, 0, "")
+        # r = [NumFatalErrors, NumErrorMsgs, NumWarnMsgs, NumInfoMsgs, ImportLog, ret]
+        fatal, errs = int(r[0]), int(r[1])
+        if _ret(r) != 0 or fatal or errs:
+            report["errors"].append(
+                f"Table import for {what} failed ({fatal} fatal, {errs} errors): {r[4]}"
+            )
+            return False
+        return True
+
+    def _define_moving_load(self, model: StructuralModel, report: dict) -> None:
+        ld = model.loads
+        if not ld or not ld.moving_load_enabled:
+            return
+        if not self._girder_rows:
+            report["errors"].append("Moving load requested but no girders were created")
+            return
+
+        m = self._m
+
+        truck = (ld.truck_type or DEFAULT_TRUCK).upper().replace(" ", "")
+        vehicles = STANDARD_TRUCKS.get(truck)
+        if vehicles is None:
+            report["errors"].append(
+                f"Unknown truck_type '{ld.truck_type}'. Supported: {sorted(STANDARD_TRUCKS)}"
+            )
+            return
+        if ld.truck_axle_loads:
+            report["loads"].append(
+                "NOTE: custom truck_axle_loads are not supported yet — "
+                f"standard vehicle '{truck}' from the SAP2000 library was used instead"
+            )
+
+        # 1. Standard vehicle(s) from SAP2000's library
+        if self._edit_table(
+            "Vehicles 1 - Standard Vehicles",
+            ["VehName", "Type", "ScaleFactor"],
+            [list(v) for v in vehicles],
+        ) != 0 or not self._apply_tables(report, "standard vehicles"):
+            return
+
+        # 2. Traffic lane + vehicle class, queued together into a SINGLE apply.
+        #    Separate back-to-back applies proved unreliable (the class edit got
+        #    left in the queue), and importing vehicles in the same apply as the
+        #    class regenerates the auto per-vehicle classes and clobbers custom
+        #    ones — so: vehicles in pass 1 above, lane+class together in pass 2.
+        #    Lane runs along the girder line closest to the middle of the deck,
+        #    defined from the girder frame objects.
+        row_indices = sorted(self._girder_rows)
+        mid_row = row_indices[len(row_indices) // 2]
+        frames = [name for _, name in sorted(self._girder_rows[mid_row])]
+        lane_width = ld.lane_width or UNIT_INFO[self._units]["lane_width"]
+
+        lane_fields = ["Lane", "LaneFrom", "LaneType", "Frame", "Width", "Offset"]
+        lane_rows = []
+        for i, fname in enumerate(frames):
+            lane_rows.append([
+                "LANE1",
+                "Frame" if i == 0 else "",
+                "Vehicle" if i == 0 else "",
+                fname,
+                str(lane_width),
+                "0",
+            ])
+        class_fields = ["VehClass", "VehName", "ScaleFactor"]
+        class_rows = [["MLCLASS", v[0], "1"] for v in vehicles]
+
+        for attempt in (1, 2):
+            if self._edit_table("Lane Definition Data", lane_fields, lane_rows) != 0:
+                report["errors"].append("Failed to queue lane definition table")
+                return
+            if self._edit_table("Vehicles 4 - Vehicle Classes", class_fields, class_rows) != 0:
+                report["errors"].append("Failed to queue vehicle class table")
+                return
+            if not self._apply_tables(report, "lane + vehicle class"):
+                return
+            if self._class_exists("MLCLASS"):
+                break
+        else:
+            report["errors"].append("Vehicle class MLCLASS missing after table import")
+            return
+
+        # 3. Moving load case (classic documented API)
+        mov = m.LoadCases.Moving
+        if _ret(mov.SetCase("MOVE1")) != 0:
+            report["errors"].append("Failed to create moving load case MOVE1")
+            return
+        if _ret(mov.SetLoads("MOVE1", 1, ["MLCLASS"], [1.0], [1.0], [1.0])) != 0:
+            report["errors"].append("Failed to assign vehicle class to MOVE1")
+            return
+        if _ret(mov.SetLanesLoaded("MOVE1", 1, 1, ["LANE1"])) != 0:
+            report["errors"].append("Failed to assign lanes to MOVE1")
+            return
+
+        info = UNIT_INFO[self._units]
+        report["loads"].append(
+            f"Moving load case MOVE1: vehicle class MLCLASS ({truck}: "
+            f"{', '.join(v[0] for v in vehicles)}) on LANE1 "
+            f"(width {lane_width} {info['len']}, along girder row {mid_row}, "
+            f"{len(frames)} frames)"
+        )
+        report["loads"].append(
+            "VERIFY: vehicle axle configuration comes from the SAP2000 standard "
+            "vehicle library - confirm against the current Caltrans BDA / AASHTO "
+            "source before using results in final calculations"
+        )
 
     def _refresh_view(self) -> None:
         try:

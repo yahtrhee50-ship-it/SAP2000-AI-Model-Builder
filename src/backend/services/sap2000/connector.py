@@ -124,7 +124,16 @@ class SAP2000Connection:
             raise RuntimeError(f"SAP2000 Save failed (code {ret})")
 
     def run_analysis(self) -> None:
-        ret = self.model.Analyze.RunDirectAnalysis()
+        # RunAnalysis requires the model to have been saved to disk at least once
+        try:
+            fname = str(self.model.GetModelFilename(True) or "")
+        except Exception:
+            fname = ""
+        if not fname or "untitled" in fname.lower():
+            import os
+            import tempfile
+            self.save(os.path.join(tempfile.gettempdir(), "sap2000_api_model.sdb"))
+        ret = self.model.Analyze.RunAnalysis()
         if ret != 0:
             raise RuntimeError(f"SAP2000 analysis failed (code {ret})")
 
