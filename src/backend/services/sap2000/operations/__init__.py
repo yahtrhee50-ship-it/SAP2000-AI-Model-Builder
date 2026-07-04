@@ -17,10 +17,13 @@ Register every new operation in OPERATIONS below; the generic
 `POST /api/sap2000/op/{name}` route dispatches by registry lookup, so adding
 an operation here is all that's needed to expose it over REST.
 """
-from . import combos, results
+from . import combos, modeling, results
 
 OPERATIONS = {
     "define_load_combos": combos.define_load_combos,
+    "add_columns": modeling.add_columns,
+    "find_joints": modeling.find_joints,
+    "run_analysis": modeling.run_analysis,
     "list_load_cases": results.list_load_cases,
     "joint_reactions": results.joint_reactions,
     "joint_displacements": results.joint_displacements,

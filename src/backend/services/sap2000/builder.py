@@ -351,7 +351,9 @@ class ModelBuilder:
                             if _ret(ret) == 0:
                                 actual = _ret_name(ret, name)
                                 m.FrameObj.SetSection(actual, sec_name)
-                                report["frames"].append(name)
+                                report["frames"].append(
+                                    name if actual == name else f"{name} -> {actual}"
+                                )
             else:
                 # Beams run X-direction
                 for ri in col_indices:
@@ -367,7 +369,9 @@ class ModelBuilder:
                             if _ret(ret) == 0:
                                 actual = _ret_name(ret, name)
                                 m.FrameObj.SetSection(actual, sec_name)
-                                report["frames"].append(name)
+                                report["frames"].append(
+                                    name if actual == name else f"{name} -> {actual}"
+                                )
 
     # ── Slab ──────────────────────────────────────────────────────────────────
 
@@ -439,8 +443,9 @@ class ModelBuilder:
         # Superimposed dead load pattern (no self-weight, added separately as area load)
         m.LoadPatterns.Add("SDL", LOAD_DEAD, 0.0, True)
 
-        # Live load pattern
-        m.LoadPatterns.Add("LL", LOAD_LIVE, 0.0, False)
+        # Live load pattern (AddLoadCase=True so an analyzable linear static
+        # case "LL" exists — with False the pattern has no results case at all)
+        m.LoadPatterns.Add("LL", LOAD_LIVE, 0.0, True)
 
         press = UNIT_INFO[self._units]["press"]
         report["loads"].append(
