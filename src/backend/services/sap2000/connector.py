@@ -136,6 +136,20 @@ class SAP2000Connection:
         ret = self.model.Analyze.RunAnalysis()
         if ret != 0:
             raise RuntimeError(f"SAP2000 analysis failed (code {ret})")
+        # Guard against silent no-op runs: RunAnalysis has been observed to
+        # return 0 without running anything (e.g. in an instance orphaned by
+        # a killed COM client). Verify at least one case actually finished.
+        # GetCaseStatus: (NumberItems, CaseName[], Status[], ret); Status
+        # 1=not run, 2=could not start, 3=not finished, 4=finished.
+        r = self.model.Analyze.GetCaseStatus(0, [], [])
+        if r[-1] == 0:
+            statuses = [int(s) for s in (r[2] or ())]
+            if statuses and not any(s == 4 for s in statuses):
+                names = [str(n) for n in (r[1] or ())]
+                raise RuntimeError(
+                    "SAP2000 RunAnalysis returned success but no load case "
+                    f"finished (case status: {dict(zip(names, statuses))}). "
+                    "The SAP2000 instance may be in a bad state — restart it.")
 
     def close(self, save: bool = False) -> None:
         if self._sap_obj:

@@ -140,3 +140,44 @@ async def sap2000_status():
     """Check whether SAP2000 is connected."""
     conn = get_connection()
     return {"connected": conn._model is not None}
+
+
+@router.get("/op")
+async def list_operations():
+    """List the available modular operations and their docstrings."""
+    from ..services.sap2000.operations import OPERATIONS
+    return {name: (fn.__doc__ or "").strip().split("\n")[0]
+            for name, fn in OPERATIONS.items()}
+
+
+@router.post("/op/{name}")
+async def run_operation(name: str, params: dict | None = None):
+    """Dispatch a modular SAP2000 operation by registry name.
+
+    Body is the operation's keyword parameters (JSON object, may be empty).
+    Each operation is a standalone function in services/sap2000/operations —
+    the same functions are designed to be exposed as agent tools later.
+    """
+    from ..services.sap2000.operations import OPERATIONS
+    fn = OPERATIONS.get(name)
+    if fn is None:
+        raise HTTPException(404, f"Unknown operation '{name}'. "
+                                 f"Available: {sorted(OPERATIONS)}")
+
+    def _run():
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except Exception:
+            pass
+        conn = get_connection()
+        if conn._model is None:
+            raise RuntimeError("Not connected to SAP2000 — POST /api/sap2000/connect first")
+        return fn(conn, **(params or {}))
+
+    try:
+        return await asyncio.to_thread(_run)
+    except TypeError as exc:
+        raise HTTPException(422, f"Bad parameters for '{name}': {exc}")
+    except Exception as exc:
+        raise HTTPException(500, f"Operation '{name}' failed: {exc}")
