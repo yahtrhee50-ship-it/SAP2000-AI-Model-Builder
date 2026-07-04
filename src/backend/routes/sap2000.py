@@ -78,8 +78,13 @@ async def build_model(session_id: str, req: BuildRequest):
 
 
 @router.post("/build-from-json")
-async def build_from_json(model_data: dict):
-    """Build SAP2000 model directly from a StructuralModel JSON payload."""
+async def build_from_json(model_data: dict, save_path: str = "", run_analysis: bool = False):
+    """Build SAP2000 model directly from a StructuralModel JSON payload.
+
+    Optional query params: save_path saves the .sdb after the build;
+    run_analysis runs the analysis (model must be saved first — if no
+    save_path is given the connector saves to a temp file automatically).
+    """
     try:
         model = StructuralModel(**model_data)
     except Exception as exc:
@@ -96,7 +101,14 @@ async def build_from_json(model_data: dict):
             conn.connect(visible=True)
         conn.initialize_new_model(model.project.unit_system.value)
         builder = ModelBuilder(conn)
-        return {"status": "success", "report": builder.build(model)}
+        report = builder.build(model)
+        if save_path:
+            conn.save(save_path)
+            report["saved_to"] = save_path
+        if run_analysis:
+            conn.run_analysis()
+            report["analysis"] = "completed"
+        return {"status": "success", "report": report}
 
     try:
         return await asyncio.to_thread(_build)

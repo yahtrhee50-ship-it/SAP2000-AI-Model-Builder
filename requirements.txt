@@ -6,3 +6,4 @@ pydantic>=2.6.0
 python-dotenv>=1.0.0
 aiofiles>=23.2.0
 pywin32>=306
+comtypes>=1.4.0

@@ -305,7 +305,11 @@ class ModelBuilder:
                             if _ret(ret) == 0:
                                 actual = _ret_name(ret, name)
                                 m.FrameObj.SetSection(actual, sec_name)
-                                report["frames"].append(name)
+                                # SAP2000 may assign its own object name; report the
+                                # actual one so results can be queried by callers
+                                report["frames"].append(
+                                    name if actual == name else f"{name} -> {actual}"
+                                )
                                 self._girder_rows.setdefault(ri, []).append((xc[i], actual))
             else:
                 for ci in row_indices:
@@ -321,7 +325,9 @@ class ModelBuilder:
                             if _ret(ret) == 0:
                                 actual = _ret_name(ret, name)
                                 m.FrameObj.SetSection(actual, sec_name)
-                                report["frames"].append(name)
+                                report["frames"].append(
+                                    name if actual == name else f"{name} -> {actual}"
+                                )
                                 self._girder_rows.setdefault(ci, []).append((yc[j], actual))
 
         # Secondary beams
