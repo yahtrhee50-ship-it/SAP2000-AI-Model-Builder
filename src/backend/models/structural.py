@@ -90,8 +90,17 @@ class LoadDefinition(BaseModel):
         description="SAP2000 standard vehicle: P5/P7/P9/P11/P13 (Caltrans permit), "
                     "HL-93, HL-93K/M/S, HS20, HS15. Default P13.",
     )
-    truck_axle_loads: Optional[list[float]] = None
-    truck_axle_spacings: Optional[list[float]] = None
+    truck_axle_loads: Optional[list[float]] = Field(
+        None,
+        description="Custom stepped axle train: N axle point loads in model "
+                    "force units (kN metric / kip imperial), front axle first. "
+                    "Overrides truck_type when given.",
+    )
+    truck_axle_spacings: Optional[list[float]] = Field(
+        None,
+        description="N-1 spacings between consecutive axles in model length "
+                    "units (m metric / ft imperial). Required with truck_axle_loads.",
+    )
 
 
 class ProjectInfo(BaseModel):

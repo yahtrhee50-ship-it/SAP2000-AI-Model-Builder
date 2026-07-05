@@ -51,9 +51,9 @@ DEFAULT_TRUCK = "P13"  # typical Caltrans permit truck
 #   kip_ft: length ft, fc ksi, unit weight kip/ft3, area loads ksf
 #   kip_in: length in, fc ksi, unit weight kip/in3, area loads kip/in2
 UNIT_INFO = {
-    "kN_m":   {"len": "m",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5, "lane_width": 3.6},
-    "kip_ft": {"len": "ft", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6,  "lane_width": 12.0},
-    "kip_in": {"len": "in", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6,  "lane_width": 144.0},
+    "kN_m":   {"len": "m",  "force": "kN",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5, "lane_width": 3.6},
+    "kip_ft": {"len": "ft", "force": "kip", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6,  "lane_width": 12.0},
+    "kip_in": {"len": "in", "force": "kip", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6,  "lane_width": 144.0},
 }
 
 
@@ -497,13 +497,36 @@ class ModelBuilder:
         ret = self._m.DatabaseTables.SetTableForEditingArray(key, 1, fields, len(rows), flat)
         return _ret(ret)
 
-    def _class_exists(self, name: str) -> bool:
+    def _table_rows(self, key: str) -> tuple[list[str], list[list[str]]]:
+        """Read a database table. Returns (fields, rows); ([], []) if empty/unreadable."""
         try:
-            r = self._m.DatabaseTables.GetTableForDisplayArray(
-                "Vehicles 4 - Vehicle Classes", [], "", 0, [], 0, [])
-            return name in list(r[4] or ())
+            r = self._m.DatabaseTables.GetTableForDisplayArray(key, [], "", 0, [], 0, [])
+            if _ret(r) != 0:
+                return [], []
+            fields = [str(f) for f in (r[2] or ())]
+            n = int(r[3] or 0)
+            data = list(r[4] or ())
+            ncol = len(fields)
+            if not ncol:
+                return [], []
+            rows = [["" if c is None else str(c) for c in data[i * ncol:(i + 1) * ncol]]
+                    for i in range(n)]
+            return fields, rows
         except Exception:
-            return False
+            return [], []
+
+    def _class_entries(self) -> list[tuple[str, str, str]]:
+        """(VehClass, VehName, ScaleFactor) rows from the vehicle-class table."""
+        fields, rows = self._table_rows("Vehicles 4 - Vehicle Classes")
+        if not fields:
+            return []
+        try:
+            ic = fields.index("VehClass")
+            iv = fields.index("VehName")
+            isf = fields.index("ScaleFactor")
+        except ValueError:
+            return []
+        return [(row[ic], row[iv], row[isf]) for row in rows]
 
     def _apply_tables(self, report: dict, what: str) -> bool:
         r = self._m.DatabaseTables.ApplyEditedTables(True, 0, 0, 0, 0, "")
@@ -525,41 +548,80 @@ class ModelBuilder:
             return
 
         m = self._m
+        info = UNIT_INFO[self._units]
 
-        truck = (ld.truck_type or DEFAULT_TRUCK).upper().replace(" ", "")
-        vehicles = STANDARD_TRUCKS.get(truck)
-        if vehicles is None:
-            report["errors"].append(
-                f"Unknown truck_type '{ld.truck_type}'. Supported: {sorted(STANDARD_TRUCKS)}"
-            )
-            return
+        # 1. Vehicle definition — either a custom stepped axle train (general
+        #    vehicle) or standard vehicle(s) from SAP2000's library.
         if ld.truck_axle_loads:
-            report["loads"].append(
-                "NOTE: custom truck_axle_loads are not supported yet — "
-                f"standard vehicle '{truck}' from the SAP2000 library was used instead"
+            axles = [float(a) for a in ld.truck_axle_loads]
+            spacings = [float(s) for s in (ld.truck_axle_spacings or [])]
+            if (not axles or len(spacings) != len(axles) - 1
+                    or any(a <= 0 for a in axles) or any(s <= 0 for s in spacings)):
+                report["errors"].append(
+                    "Invalid custom axle train: need N axle loads > 0 "
+                    "(model force units) and N-1 spacings > 0 (model length units); "
+                    f"got {len(axles)} loads, {len(spacings)} spacings"
+                )
+                return
+            veh_names = ["CUSTOM1"]
+            load_fields = ["VehName", "LoadType", "InterUnif", "InterAxle",
+                           "InterMinD", "InterMaxD"]
+            load_rows = [["CUSTOM1", "Leading Load", "0", str(axles[0]), "", ""]]
+            for axle, spacing in zip(axles[1:], spacings):
+                load_rows.append(
+                    ["CUSTOM1", "Fixed Length", "0", str(axle), str(spacing), ""])
+            if (self._edit_table(
+                    "Vehicles 2 - General Vehicles 1 - General",
+                    ["VehName", "NumInter", "StayInLane"],
+                    [["CUSTOM1", str(len(load_rows)), "No"]]) != 0
+                    or self._edit_table(
+                        "Vehicles 3 - General Vehicles 2 - Loads",
+                        load_fields, load_rows) != 0
+                    or not self._apply_tables(report, "custom vehicle")):
+                return
+            truck_desc = (
+                f"custom axle train, {len(axles)} axles, "
+                f"total {sum(axles):g} {info['force']}"
             )
+        else:
+            truck = (ld.truck_type or DEFAULT_TRUCK).upper().replace(" ", "")
+            vehicles = STANDARD_TRUCKS.get(truck)
+            if vehicles is None:
+                report["errors"].append(
+                    f"Unknown truck_type '{ld.truck_type}'. Supported: {sorted(STANDARD_TRUCKS)}"
+                )
+                return
+            if self._edit_table(
+                "Vehicles 1 - Standard Vehicles",
+                ["VehName", "Type", "ScaleFactor"],
+                [list(v) for v in vehicles],
+            ) != 0 or not self._apply_tables(report, "standard vehicles"):
+                return
+            veh_names = [v[0] for v in vehicles]
+            truck_desc = f"{truck}: {', '.join(veh_names)}"
 
-        # 1. Standard vehicle(s) from SAP2000's library
-        if self._edit_table(
-            "Vehicles 1 - Standard Vehicles",
-            ["VehName", "Type", "ScaleFactor"],
-            [list(v) for v in vehicles],
-        ) != 0 or not self._apply_tables(report, "standard vehicles"):
-            return
-
-        # 2. Traffic lane + vehicle class, queued together into a SINGLE apply.
-        #    Separate back-to-back applies proved unreliable (the class edit got
-        #    left in the queue), and importing vehicles in the same apply as the
-        #    class regenerates the auto per-vehicle classes and clobbers custom
-        #    ones — so: vehicles in pass 1 above, lane+class together in pass 2.
-        #    Lane runs along the girder line closest to the middle of the deck,
-        #    defined from the girder frame objects.
+        # 2. Traffic lane + vehicle class, queued together into a SINGLE apply
+        #    (importing vehicles in the same apply as the class regenerates the
+        #    auto per-vehicle classes and clobbers custom ones). Lane runs along
+        #    the girder line closest to the middle of the deck.
         row_indices = sorted(self._girder_rows)
         mid_row = row_indices[len(row_indices) // 2]
         frames = [name for _, name in sorted(self._girder_rows[mid_row])]
-        lane_width = ld.lane_width or UNIT_INFO[self._units]["lane_width"]
+        lane_width = ld.lane_width or info["lane_width"]
 
-        lane_fields = ["Lane", "LaneFrom", "LaneType", "Frame", "Width", "Offset"]
+        # Lane discretization: SAP2000 evaluates influence values at discrete
+        # lane points and interpolates linearly between them. Align those
+        # points with the default frame output stations (9 segments per frame)
+        # so envelope values AT the output stations are exact, not interpolated
+        # (verified live: coarse default discretization under-reported interior
+        # shear envelope by up to 10%).
+        coords = (model.grid.x_coords if model.girders.direction == "X"
+                  else model.grid.y_coords)
+        seg_lengths = [b - a for a, b in zip(coords, coords[1:]) if b > a]
+        disc_along = min(seg_lengths) / 9.0 if seg_lengths else lane_width / 6.0
+
+        lane_fields = ["Lane", "LaneFrom", "LaneType", "Frame", "Width",
+                       "Offset", "DiscAlong"]
         lane_rows = []
         for i, fname in enumerate(frames):
             lane_rows.append([
@@ -569,23 +631,59 @@ class ModelBuilder:
                 fname,
                 str(lane_width),
                 "0",
+                f"{disc_along:.6g}" if i == 0 else "",
             ])
         class_fields = ["VehClass", "VehName", "ScaleFactor"]
-        class_rows = [["MLCLASS", v[0], "1"] for v in vehicles]
+        mlclass_rows = [["MLCLASS", vn, "1"] for vn in veh_names]
 
-        for attempt in (1, 2):
-            if self._edit_table("Lane Definition Data", lane_fields, lane_rows) != 0:
-                report["errors"].append("Failed to queue lane definition table")
-                return
-            if self._edit_table("Vehicles 4 - Vehicle Classes", class_fields, class_rows) != 0:
-                report["errors"].append("Failed to queue vehicle class table")
-                return
-            if not self._apply_tables(report, "lane + vehicle class"):
-                return
-            if self._class_exists("MLCLASS"):
+        if self._edit_table("Lane Definition Data", lane_fields, lane_rows) != 0:
+            report["errors"].append("Failed to queue lane definition table")
+            return
+        if self._edit_table("Vehicles 4 - Vehicle Classes", class_fields, mlclass_rows) != 0:
+            report["errors"].append("Failed to queue vehicle class table")
+            return
+        if not self._apply_tables(report, "lane + vehicle class"):
+            return
+
+        # 2b. Verify-and-repair loop for the vehicle class. Observed on SAP2000
+        #     27.1: the first class-table import after a vehicle import can go
+        #     LATENT — it does not show in read-back but replays on the NEXT
+        #     class import, duplicating rows (this corrupted earlier models and
+        #     made SAP2000 raise an error when the saved file was reopened).
+        #     Repair: rewrite the FULL corrected class table (custom class rows
+        #     exactly once + the auto per-vehicle classes) and re-verify.
+        #     Empirically converges by the second rewrite.
+        expected = sorted(("MLCLASS", vn) for vn in veh_names)
+
+        def _mlclass_ok() -> bool:
+            got = sorted((c, v) for c, v, _ in self._class_entries() if c == "MLCLASS")
+            return got == expected
+
+        for _ in range(3):
+            if _mlclass_ok():
                 break
-        else:
-            report["errors"].append("Vehicle class MLCLASS missing after table import")
+            others = []
+            for entry in self._class_entries():
+                if entry[0] != "MLCLASS" and list(entry) not in others:
+                    others.append(list(entry))
+            if self._edit_table("Vehicles 4 - Vehicle Classes", class_fields,
+                                mlclass_rows + others) != 0 \
+                    or not self._apply_tables(report, "vehicle class repair"):
+                return
+        if not _mlclass_ok():
+            report["errors"].append(
+                "Vehicle class MLCLASS wrong after repeated table imports: "
+                f"{self._class_entries()}"
+            )
+            return
+
+        # 2c. Verify the lane read-back: exactly one row per girder frame.
+        _, lrows = self._table_rows("Lane Definition Data")
+        lane_frames = [row[2] for row in lrows if row and row[0] == "LANE1"]
+        if sorted(lane_frames) != sorted(frames):
+            report["errors"].append(
+                f"Lane LANE1 read-back mismatch: expected frames {frames}, got {lane_frames}"
+            )
             return
 
         # 3. Moving load case (classic documented API)
@@ -600,18 +698,30 @@ class ModelBuilder:
             report["errors"].append("Failed to assign lanes to MOVE1")
             return
 
-        info = UNIT_INFO[self._units]
+        # 3b. Verify the case read-back through the database tables.
+        _, arows = self._table_rows("Case - Moving Load 1 - Lane Assignments")
+        assign = [row for row in arows if row and row[0] == "MOVE1"]
+        _, lnrows = self._table_rows("Case - Moving Load 2 - Lanes Loaded")
+        lanes_loaded = [row for row in lnrows if row and row[0] == "MOVE1"]
+        if len(assign) != 1 or assign[0][2] != "MLCLASS" \
+                or len(lanes_loaded) != 1 or lanes_loaded[0][2] != "LANE1":
+            report["errors"].append(
+                "MOVE1 case read-back mismatch: "
+                f"assignments={assign}, lanes={lanes_loaded}"
+            )
+            return
+
         report["loads"].append(
-            f"Moving load case MOVE1: vehicle class MLCLASS ({truck}: "
-            f"{', '.join(v[0] for v in vehicles)}) on LANE1 "
+            f"Moving load case MOVE1: vehicle class MLCLASS ({truck_desc}) on LANE1 "
             f"(width {lane_width} {info['len']}, along girder row {mid_row}, "
             f"{len(frames)} frames)"
         )
-        report["loads"].append(
-            "VERIFY: vehicle axle configuration comes from the SAP2000 standard "
-            "vehicle library - confirm against the current Caltrans BDA / AASHTO "
-            "source before using results in final calculations"
-        )
+        if not ld.truck_axle_loads:
+            report["loads"].append(
+                "VERIFY: vehicle axle configuration comes from the SAP2000 standard "
+                "vehicle library - confirm against the current Caltrans BDA / AASHTO "
+                "source before using results in final calculations"
+            )
 
     def _refresh_view(self) -> None:
         try:
