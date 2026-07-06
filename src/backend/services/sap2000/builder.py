@@ -22,38 +22,96 @@ SHELL_MEMBRANE = 3
 LOAD_DEAD = 1
 LOAD_LIVE = 3
 
-# Standard vehicles from SAP2000's built-in library, selected by truck_type.
-# Each entry: list of (VehName, Type, ScaleFactor) rows for the
-# "Vehicles 1 - Standard Vehicles" database table. For HSn-44 the scale factor
-# is the "n" (HS20-44 = HSn-44 with SF 20). Axle weights/spacings come from
-# SAP2000's vehicle library — verify against the current Caltrans BDA / AASHTO
-# source before using results in final calculations.
-STANDARD_TRUCKS = {
-    "P5":     [("P5", "P5", "1")],
-    "P7":     [("P7", "P7", "1")],
-    "P9":     [("P9", "P9", "1")],
-    "P11":    [("P11", "P11", "1")],
-    "P13":    [("P13", "P13", "1")],
-    "HL-93":  [("HL-93K", "HL-93K", "1"), ("HL-93M", "HL-93M", "1"),
-               ("HL-93S", "HL-93S", "1")],
-    "HL-93K": [("HL-93K", "HL-93K", "1")],
-    "HL-93M": [("HL-93M", "HL-93M", "1")],
-    "HL-93S": [("HL-93S", "HL-93S", "1")],
-    "HS20":   [("HS20-44", "HSn-44", "20")],
-    "HS20-44": [("HS20-44", "HSn-44", "20")],
-    "HS15":   [("HS15-44", "HSn-44", "15")],
+# ── Vehicle library ──────────────────────────────────────────────────────────
+#
+# EVERY truck is built as a GENERAL vehicle ("Vehicles 2/3 - General Vehicles"),
+# never a SAP2000 LIBRARY standard vehicle ("Vehicles 1"). On a non-Bridge
+# SAP2000 license a library vehicle carries width / length / floating-axle /
+# response-component features the program cannot represent: it opens with a
+# CSiBridge conversion warning and is stripped to a flat load. General vehicles
+# carry none of those features and reproduce the discrete axle train (the
+# encoding verified live to 0.01% against influence-line statics).
+#
+# AASHTO code vehicles are defined here from published AASHTO LRFD data — axle
+# loads in kip, spacings in ft, design-lane load in kip/ft (converted to model
+# units at build time). Each entry is a list of sub-vehicles
+# (VehName, axle_loads, axle_spacings, lane_load, source); the vehicle CLASS
+# (MLCLASS) envelopes them, so HL-93 = max of design truck / design tandem, each
+# superimposed with the design-lane load. VERIFY against the current AASHTO LRFD
+# before final use.
+AASHTO_VEHICLES = {
+    "HS20": [
+        ("HS20-44", [8.0, 32.0, 32.0], [14.0, 14.0], 0.0,
+         "AASHTO LRFD 3.6.1.2.2 design truck (HS20); rear axle spacing "
+         "14-30 ft variable modeled at 14 ft (governs typical spans)"),
+    ],
+    "HS15": [
+        ("HS15-44", [6.0, 24.0, 24.0], [14.0, 14.0], 0.0,
+         "AASHTO LRFD design truck scaled 0.75 (HS15); rear axle spacing "
+         "14-30 ft variable modeled at 14 ft"),
+    ],
+    "HL-93": [
+        ("HL93TRUCK", [8.0, 32.0, 32.0], [14.0, 14.0], 0.64,
+         "AASHTO LRFD 3.6.1.2.2/3.6.1.2.4 design truck + 0.64 klf design-lane "
+         "load; rear spacing 14-30 ft variable modeled at 14 ft"),
+        ("HL93TANDEM", [25.0, 25.0], [4.0], 0.64,
+         "AASHTO LRFD 3.6.1.2.3/3.6.1.2.4 design tandem + 0.64 klf design-lane "
+         "load"),
+    ],
 }
-DEFAULT_TRUCK = "P13"  # typical Caltrans permit truck
+# Case/space-insensitive aliases (truck_type is upper()/despaced before lookup).
+AASHTO_VEHICLES["HS20-44"] = AASHTO_VEHICLES["HS20"]
+AASHTO_VEHICLES["HS15-44"] = AASHTO_VEHICLES["HS15"]
+AASHTO_VEHICLES["HL93"] = AASHTO_VEHICLES["HL-93"]
+
+# Caltrans permit trucks: axle data must be source-confirmed by the engineer
+# (Reference caltrans-vehicles.md — do not rely on memorized permit axle
+# weights/spacings). Requesting one raises with guidance to supply
+# truck_axle_loads / truck_axle_spacings.
+CALTRANS_PERMIT_TRUCKS = {"P5", "P7", "P9", "P11", "P13"}
+
+DEFAULT_TRUCK = "P13"  # Caltrans permit truck — requires engineer-supplied axles
+
+
+def _general_vehicle_rows(veh_name: str, axle_loads, spacings, unif_load=0.0):
+    """Build the SAP2000 general-vehicle table rows for one vehicle, in MODEL
+    units. Returns (general_row, load_rows):
+      general_row -> "Vehicles 2 - General Vehicles 1 - General"
+                     [VehName, NumInter, StayInLane]
+      load_rows   -> "Vehicles 3 - General Vehicles 2 - Loads"
+                     [VehName, LoadType, InterUnif, InterAxle, InterMinD,
+                      InterMaxD] — a Leading Load first axle then Fixed Length
+                     axles at the given spacings.
+    unif_load is a uniform (design-lane) load per unit length carried on every
+    segment (0 for a pure axle train). Raises ValueError on malformed input
+    (need N axle loads > 0 and N-1 spacings > 0)."""
+    axles = [float(a) for a in axle_loads]
+    gaps = [float(s) for s in (spacings or [])]
+    if (not axles or len(gaps) != len(axles) - 1
+            or any(a <= 0 for a in axles) or any(g <= 0 for g in gaps)):
+        raise ValueError(
+            f"vehicle {veh_name}: need N axle loads > 0 (model force units) and "
+            f"N-1 spacings > 0 (model length units); got {len(axles)} loads, "
+            f"{len(gaps)} spacings")
+    u = f"{unif_load:g}"
+    load_rows = [[veh_name, "Leading Load", u, f"{axles[0]:g}", "", ""]]
+    for axle, gap in zip(axles[1:], gaps):
+        load_rows.append(
+            [veh_name, "Fixed Length", u, f"{axle:g}", f"{gap:g}", ""])
+    general_row = [veh_name, str(len(load_rows)), "No"]
+    return general_row, load_rows
 
 # Model input convention per unit system (values in StructuralModel must already
 # be in these units — the interview prompt instructs the AI to convert):
 #   kN_m:   length m,  fc MPa, unit weight kN/m3,  area loads kN/m2
 #   kip_ft: length ft, fc ksi, unit weight kip/ft3, area loads ksf
 #   kip_in: length in, fc ksi, unit weight kip/in3, area loads kip/in2
+# kip_to_force / ft_to_len convert the AASHTO_VEHICLES data (canonical kip, ft,
+# kip/ft) into each model unit system.
 UNIT_INFO = {
-    "kN_m":   {"len": "m",  "force": "kN",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5, "lane_width": 3.6},
-    "kip_ft": {"len": "ft", "force": "kip", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6,  "lane_width": 12.0},
-    "kip_in": {"len": "in", "force": "kip", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6,  "lane_width": 144.0},
+    "kN_m":   {"len": "m",  "force": "kN",  "press": "kN/m2",   "mm_to_len": 1 / 1000.0,  "thermal": 1.17e-5, "lane_width": 3.6,   "kip_to_force": 4.4482216, "ft_to_len": 0.3048},
+    "kip_ft": {"len": "ft", "force": "kip", "press": "ksf",     "mm_to_len": 1 / 304.8,   "thermal": 6.5e-6,  "lane_width": 12.0,  "kip_to_force": 1.0,       "ft_to_len": 1.0},
+    "kip_in": {"len": "in", "force": "kip", "press": "kip/in2", "mm_to_len": 1 / 25.4,    "thermal": 6.5e-6,  "lane_width": 144.0, "kip_to_force": 1.0,       "ft_to_len": 12.0},
 }
 
 
@@ -539,6 +597,33 @@ class ModelBuilder:
             return False
         return True
 
+    def _write_general_vehicles(self, report: dict, what: str, vehicles) -> list | None:
+        """Write one or more general vehicles into the Vehicles 2/3 tables in a
+        SINGLE apply. `vehicles` = list of (veh_name, axle_loads, spacings,
+        unif_load) in MODEL units. All general rows go into one edit of
+        "Vehicles 2" and all load rows into one edit of "Vehicles 3" (a second
+        SetTableForEditingArray on the same table would overwrite the first).
+        Returns the vehicle names on success, or None (error already appended)."""
+        gen_rows, load_rows, names = [], [], []
+        for veh_name, axle_loads, spacings, unif_load in vehicles:
+            try:
+                g, lr = _general_vehicle_rows(veh_name, axle_loads, spacings, unif_load)
+            except ValueError as exc:
+                report["errors"].append(str(exc))
+                return None
+            gen_rows.append(g)
+            load_rows.extend(lr)
+            names.append(veh_name)
+        if (self._edit_table("Vehicles 2 - General Vehicles 1 - General",
+                             ["VehName", "NumInter", "StayInLane"], gen_rows) != 0
+                or self._edit_table(
+                    "Vehicles 3 - General Vehicles 2 - Loads",
+                    ["VehName", "LoadType", "InterUnif", "InterAxle",
+                     "InterMinD", "InterMaxD"], load_rows) != 0
+                or not self._apply_tables(report, what)):
+            return None
+        return names
+
     def _define_moving_load(self, model: StructuralModel, report: dict) -> None:
         ld = model.loads
         if not ld or not ld.moving_load_enabled:
@@ -550,34 +635,17 @@ class ModelBuilder:
         m = self._m
         info = UNIT_INFO[self._units]
 
-        # 1. Vehicle definition — either a custom stepped axle train (general
-        #    vehicle) or standard vehicle(s) from SAP2000's library.
+        # 1. Vehicle definition — ALWAYS a general vehicle (Vehicles 2/3), never a
+        #    SAP2000 library standard vehicle (Vehicles 1), which a non-Bridge
+        #    license strips to a flat load (see the Vehicle library note above).
+        veh_sources: list[str] = []
         if ld.truck_axle_loads:
+            # Engineer-supplied axle train (values already in model units).
             axles = [float(a) for a in ld.truck_axle_loads]
             spacings = [float(s) for s in (ld.truck_axle_spacings or [])]
-            if (not axles or len(spacings) != len(axles) - 1
-                    or any(a <= 0 for a in axles) or any(s <= 0 for s in spacings)):
-                report["errors"].append(
-                    "Invalid custom axle train: need N axle loads > 0 "
-                    "(model force units) and N-1 spacings > 0 (model length units); "
-                    f"got {len(axles)} loads, {len(spacings)} spacings"
-                )
-                return
-            veh_names = ["CUSTOM1"]
-            load_fields = ["VehName", "LoadType", "InterUnif", "InterAxle",
-                           "InterMinD", "InterMaxD"]
-            load_rows = [["CUSTOM1", "Leading Load", "0", str(axles[0]), "", ""]]
-            for axle, spacing in zip(axles[1:], spacings):
-                load_rows.append(
-                    ["CUSTOM1", "Fixed Length", "0", str(axle), str(spacing), ""])
-            if (self._edit_table(
-                    "Vehicles 2 - General Vehicles 1 - General",
-                    ["VehName", "NumInter", "StayInLane"],
-                    [["CUSTOM1", str(len(load_rows)), "No"]]) != 0
-                    or self._edit_table(
-                        "Vehicles 3 - General Vehicles 2 - Loads",
-                        load_fields, load_rows) != 0
-                    or not self._apply_tables(report, "custom vehicle")):
+            veh_names = self._write_general_vehicles(
+                report, "custom vehicle", [("CUSTOM1", axles, spacings, 0.0)])
+            if veh_names is None:
                 return
             truck_desc = (
                 f"custom axle train, {len(axles)} axles, "
@@ -585,20 +653,42 @@ class ModelBuilder:
             )
         else:
             truck = (ld.truck_type or DEFAULT_TRUCK).upper().replace(" ", "")
-            vehicles = STANDARD_TRUCKS.get(truck)
-            if vehicles is None:
+            if truck in CALTRANS_PERMIT_TRUCKS:
                 report["errors"].append(
-                    f"Unknown truck_type '{ld.truck_type}'. Supported: {sorted(STANDARD_TRUCKS)}"
+                    f"truck_type '{ld.truck_type or DEFAULT_TRUCK}' is a Caltrans "
+                    f"permit vehicle. SAP2000 library standard vehicles are "
+                    f"unsupported on this non-Bridge license (they open with a "
+                    f"CSiBridge conversion warning and degrade to a flat load). "
+                    f"Supply truck_axle_loads + truck_axle_spacings in model units "
+                    f"({info['force']}, {info['len']}) from a current Caltrans BDA "
+                    f"source."
                 )
                 return
-            if self._edit_table(
-                "Vehicles 1 - Standard Vehicles",
-                ["VehName", "Type", "ScaleFactor"],
-                [list(v) for v in vehicles],
-            ) != 0 or not self._apply_tables(report, "standard vehicles"):
+            entry = AASHTO_VEHICLES.get(truck)
+            if entry is None:
+                report["errors"].append(
+                    f"Unknown truck_type '{ld.truck_type}'. AASHTO vehicles: "
+                    f"{sorted(AASHTO_VEHICLES)}; Caltrans permit trucks "
+                    f"{sorted(CALTRANS_PERMIT_TRUCKS)} require truck_axle_loads / "
+                    f"truck_axle_spacings."
+                )
                 return
-            veh_names = [v[0] for v in vehicles]
-            truck_desc = f"{truck}: {', '.join(veh_names)}"
+            # Convert canonical AASHTO kip / ft / (kip/ft) into model units.
+            kf, lf = info["kip_to_force"], info["ft_to_len"]
+            vehicles = []
+            for vname, kip_axles, ft_spacings, klf_lane, source in entry:
+                vehicles.append((
+                    vname,
+                    [a * kf for a in kip_axles],
+                    [s * lf for s in ft_spacings],
+                    klf_lane * kf / lf,
+                ))
+                veh_sources.append(f"{vname}: {source}")
+            veh_names = self._write_general_vehicles(
+                report, "AASHTO general vehicles", vehicles)
+            if veh_names is None:
+                return
+            truck_desc = f"{truck} (AASHTO general vehicle): {', '.join(veh_names)}"
 
         # 2. Traffic lane + vehicle class, queued together into a SINGLE apply
         #    (importing vehicles in the same apply as the class regenerates the
@@ -716,11 +806,10 @@ class ModelBuilder:
             f"(width {lane_width} {info['len']}, along girder row {mid_row}, "
             f"{len(frames)} frames)"
         )
-        if not ld.truck_axle_loads:
+        for src in veh_sources:
             report["loads"].append(
-                "VERIFY: vehicle axle configuration comes from the SAP2000 standard "
-                "vehicle library - confirm against the current Caltrans BDA / AASHTO "
-                "source before using results in final calculations"
+                f"VERIFY axle data — {src}. Confirm against the current AASHTO LRFD "
+                f"before using results in final calculations."
             )
 
     def _refresh_view(self) -> None:
