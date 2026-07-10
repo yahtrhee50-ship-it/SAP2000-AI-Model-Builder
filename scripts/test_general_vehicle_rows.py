@@ -47,9 +47,16 @@ check("HS20 3rd axle Fixed Length @14", loads[2] == ["HS20-44", "Fixed Length", 
 check("HS20 has exactly 3 load rows", len(loads) == 3, len(loads))
 
 # uniform (design-lane) load carried on every segment
-_, hl = _general_vehicle_rows("HL93TRUCK", [8.0, 32.0, 32.0], [14.0, 14.0], 0.64)
+hl_gen, hl = _general_vehicle_rows("HL93TRUCK", [8.0, 32.0, 32.0], [14.0, 14.0], 0.64)
 check("HL-93 truck InterUnif=0.64 on all rows",
       all(r[2] == "0.64" for r in hl), [r[2] for r in hl])
+check("HL-93 truck has trailing uniform row (axles + 1)",
+      len(hl) == 4 and hl[-1] == ["HL93TRUCK", "Trailing Load", "0.64", "", "", ""],
+      hl[-1] if hl else hl)
+check("HL-93 truck general row counts trailing segment",
+      hl_gen == ["HL93TRUCK", "4", "No"], hl_gen)
+check("no trailing row without a lane load (HS20)",
+      all(r[1] != "Trailing Load" for r in loads))
 
 # malformed input rejected
 for bad in ([[], []], [[10.0, 20.0], []], [[10.0, -5.0], [14.0]], [[0.0], []]):

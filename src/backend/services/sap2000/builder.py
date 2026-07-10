@@ -98,6 +98,13 @@ def _general_vehicle_rows(veh_name: str, axle_loads, spacings, unif_load=0.0):
     for axle, gap in zip(axles[1:], gaps):
         load_rows.append(
             [veh_name, "Fixed Length", u, f"{axle:g}", f"{gap:g}", ""])
+    if unif_load:
+        # The leading/inter-axle uniform loads only cover the vehicle and the
+        # lane AHEAD of it; without a trailing row the lane behind the last
+        # axle is never loaded and lane-load envelopes under-report (verified
+        # live: HL-93 midspan M3 came out 1047 vs 1088 kip-ft on a 60 ft span
+        # — exactly the missing w*integral behind the rear axle).
+        load_rows.append([veh_name, "Trailing Load", u, "", "", ""])
     general_row = [veh_name, str(len(load_rows)), "No"]
     return general_row, load_rows
 
