@@ -168,10 +168,14 @@ class ModelBuilder:
         self._m = conn.model
         self._steel_mat   = "A992"      # updated by _define_materials
         self._concrete_mat = "Concrete"  # updated by _define_materials
+        self._concrete_created = False   # set by _define_materials
         self._units = "kN_m"             # updated by build()
         # {girder row index: [(start_coord, actual_frame_name), ...]} — filled by
         # _add_frames, consumed by _define_moving_load for lane definition
         self._girder_rows: dict[int, list[tuple[float, str]]] = {}
+        # {("X"|"Y", grid line index): [(start_coord, actual_frame_name), ...]}
+        # — every frame line (girders + frame groups), for lane targeting
+        self._frame_lines: dict[tuple[str, int], list[tuple[float, str]]] = {}
 
     def build(self, model: StructuralModel) -> dict:
         """Build the full SAP2000 model. Returns a report dict."""
@@ -185,6 +189,16 @@ class ModelBuilder:
             "errors": [],
         }
         self._units = model.project.unit_system.value
+
+        # Flush any interactive-table edits left queued by a previous COM
+        # client (e.g. a crashed script). A stale queue makes the FIRST
+        # ApplyEditedTables of this build fail with the empty-queue
+        # signature (ret!=0, 0 fatal, 0 errors, empty log) — observed live
+        # 2026-07-11 on an attached instance.
+        try:
+            self._m.DatabaseTables.CancelTableEditing()
+        except Exception:
+            pass
 
         try:
             self._define_materials(model, report)
@@ -226,6 +240,7 @@ class ModelBuilder:
                 report["errors"].append(f"Failed to create concrete material '{name}'")
                 return
             self._concrete_mat = name
+            self._concrete_created = True
             info = UNIT_INFO[self._units]
             E = _concrete_E(model.slab.concrete_fc, self._units)
             if _ret(m.PropMaterial.SetMPIsotropic(name, E, 0.2, info["thermal"])) != 0:
@@ -234,6 +249,27 @@ class ModelBuilder:
             if _ret(m.PropMaterial.SetWeightAndMass(name, 1, model.slab.unit_weight)) != 0:
                 report["errors"].append(f"Failed to set concrete unit weight on '{name}'")
             report["materials"].append(f"Concrete {name} (E={E:.0f} {info['press']})")
+
+        # Concrete for frame groups when there is no slab to define it from.
+        # Uses a default fc (4 ksi imperial / 28 MPa metric) and normal weight;
+        # with a slab, frame concrete shares the slab material (same fc).
+        needs_conc = any(
+            g.section.material.lower().startswith("conc") for g in model.frame_groups)
+        if needs_conc and not self._concrete_created:
+            name = "Concrete_Frame"
+            if _ret(m.PropMaterial.SetMaterial(name, MAT_CONCRETE)) != 0:
+                report["errors"].append(f"Failed to create concrete material '{name}'")
+                return
+            info = UNIT_INFO[self._units]
+            fc = 4.0 if self._units.startswith("kip") else 28.0
+            uw = {"kip_ft": 0.15, "kip_in": 0.15 / 1728.0}.get(self._units, 24.0)
+            E = _concrete_E(fc, self._units)
+            m.PropMaterial.SetMPIsotropic(name, E, 0.2, info["thermal"])
+            m.PropMaterial.SetWeightAndMass(name, 1, uw)
+            self._concrete_mat = name
+            self._concrete_created = True
+            report["materials"].append(
+                f"Concrete {name} (default fc={fc:g}, E={E:.0f} {info['press']})")
 
     # ── Section properties ─────────────────────────────────────────────────────
 
@@ -245,6 +281,18 @@ class ModelBuilder:
 
         if model.beams:
             self._add_frame_section(model.beams.section, self._steel_mat, report)
+
+        for grp in model.frame_groups:
+            if grp.section.material.lower().startswith("conc"):
+                mat = self._concrete_mat
+                if not self._concrete_created:
+                    report["errors"].append(
+                        f"Frame group '{grp.name}' wants concrete but no "
+                        f"concrete material was created")
+                    continue
+            else:
+                mat = self._steel_mat
+            self._add_frame_section(grp.section, mat, report)
 
         if model.slab:
             slab = model.slab
@@ -376,6 +424,7 @@ class ModelBuilder:
                                     name if actual == name else f"{name} -> {actual}"
                                 )
                                 self._girder_rows.setdefault(ri, []).append((xc[i], actual))
+                                self._frame_lines.setdefault(("X", ri), []).append((xc[i], actual))
             else:
                 for ci in row_indices:
                     if ci >= len(xc):
@@ -394,6 +443,7 @@ class ModelBuilder:
                                     name if actual == name else f"{name} -> {actual}"
                                 )
                                 self._girder_rows.setdefault(ci, []).append((yc[j], actual))
+                                self._frame_lines.setdefault(("Y", ci), []).append((yc[j], actual))
 
         # Secondary beams
         if model.beams:
@@ -437,6 +487,46 @@ class ModelBuilder:
                                 report["frames"].append(
                                     name if actual == name else f"{name} -> {actual}"
                                 )
+
+        # Frame groups (any number of member families, each with its own section)
+        for grp in model.frame_groups:
+            sec_name = grp.section.name
+            if grp.direction == "X":
+                for ri in grp.line_indices:
+                    if ri >= len(yc):
+                        continue
+                    y = yc[ri]
+                    for i in range(len(xc) - 1):
+                        p1 = joints.get((xc[i], y))
+                        p2 = joints.get((xc[i+1], y))
+                        if p1 and p2:
+                            name = f"{grp.name}_X_{ri}_{i}"
+                            ret = m.FrameObj.AddByPoint(p1, p2, name)
+                            if _ret(ret) == 0:
+                                actual = _ret_name(ret, name)
+                                m.FrameObj.SetSection(actual, sec_name)
+                                report["frames"].append(
+                                    name if actual == name else f"{name} -> {actual}"
+                                )
+                                self._frame_lines.setdefault(("X", ri), []).append((xc[i], actual))
+            else:
+                for ci in grp.line_indices:
+                    if ci >= len(xc):
+                        continue
+                    x = xc[ci]
+                    for j in range(len(yc) - 1):
+                        p1 = joints.get((x, yc[j]))
+                        p2 = joints.get((x, yc[j+1]))
+                        if p1 and p2:
+                            name = f"{grp.name}_Y_{ci}_{j}"
+                            ret = m.FrameObj.AddByPoint(p1, p2, name)
+                            if _ret(ret) == 0:
+                                actual = _ret_name(ret, name)
+                                m.FrameObj.SetSection(actual, sec_name)
+                                report["frames"].append(
+                                    name if actual == name else f"{name} -> {actual}"
+                                )
+                                self._frame_lines.setdefault(("Y", ci), []).append((yc[j], actual))
 
     # ── Slab ──────────────────────────────────────────────────────────────────
 
@@ -593,16 +683,28 @@ class ModelBuilder:
             return []
         return [(row[ic], row[iv], row[isf]) for row in rows]
 
-    def _apply_tables(self, report: dict, what: str) -> bool:
+    def _apply_raw(self) -> tuple[bool, int, int, str]:
         r = self._m.DatabaseTables.ApplyEditedTables(True, 0, 0, 0, 0, "")
         # r = [NumFatalErrors, NumErrorMsgs, NumWarnMsgs, NumInfoMsgs, ImportLog, ret]
         fatal, errs = int(r[0]), int(r[1])
-        if _ret(r) != 0 or fatal or errs:
+        ok = _ret(r) == 0 and not fatal and not errs
+        return ok, fatal, errs, str(r[4] or "")
+
+    @staticmethod
+    def _is_first_apply_flake(ok: bool, fatal: int, errs: int, log: str) -> bool:
+        """The FIRST ApplyEditedTables on a freshly launched SAP2000 instance
+        can fail with ret!=0, 0 fatal, 0 errors and an EMPTY import log (the
+        queued edits are eaten; observed live 2026-07-11, twice, both on the
+        first build after launch — identical re-queue+apply succeeds)."""
+        return (not ok) and fatal == 0 and errs == 0 and not log.strip()
+
+    def _apply_tables(self, report: dict, what: str) -> bool:
+        ok, fatal, errs, log = self._apply_raw()
+        if not ok:
             report["errors"].append(
-                f"Table import for {what} failed ({fatal} fatal, {errs} errors): {r[4]}"
+                f"Table import for {what} failed ({fatal} fatal, {errs} errors): {log}"
             )
-            return False
-        return True
+        return ok
 
     def _write_general_vehicles(self, report: dict, what: str, vehicles) -> list | None:
         """Write one or more general vehicles into the Vehicles 2/3 tables in a
@@ -621,22 +723,35 @@ class ModelBuilder:
             gen_rows.append(g)
             load_rows.extend(lr)
             names.append(veh_name)
-        if (self._edit_table("Vehicles 2 - General Vehicles 1 - General",
-                             ["VehName", "NumInter", "StayInLane"], gen_rows) != 0
-                or self._edit_table(
-                    "Vehicles 3 - General Vehicles 2 - Loads",
-                    ["VehName", "LoadType", "InterUnif", "InterAxle",
-                     "InterMinD", "InterMaxD"], load_rows) != 0
-                or not self._apply_tables(report, what)):
+        for attempt in (1, 2):
+            if (self._edit_table("Vehicles 2 - General Vehicles 1 - General",
+                                 ["VehName", "NumInter", "StayInLane"],
+                                 gen_rows) != 0
+                    or self._edit_table(
+                        "Vehicles 3 - General Vehicles 2 - Loads",
+                        ["VehName", "LoadType", "InterUnif", "InterAxle",
+                         "InterMinD", "InterMaxD"], load_rows) != 0):
+                report["errors"].append(f"Failed to queue vehicle tables for {what}")
+                return None
+            ok, fatal, errs, log_txt = self._apply_raw()
+            if ok:
+                return names
+            if attempt == 1 and self._is_first_apply_flake(ok, fatal, errs, log_txt):
+                log.warning("First table apply came back empty (fresh-instance "
+                            "flake) — re-queueing vehicle tables for %s", what)
+                continue
+            report["errors"].append(
+                f"Table import for {what} failed ({fatal} fatal, {errs} errors): {log_txt}")
             return None
-        return names
+        return None
 
     def _define_moving_load(self, model: StructuralModel, report: dict) -> None:
         ld = model.loads
         if not ld or not ld.moving_load_enabled:
             return
-        if not self._girder_rows:
-            report["errors"].append("Moving load requested but no girders were created")
+        if not self._frame_lines:
+            report["errors"].append(
+                "Moving load requested but no girders or frame groups were created")
             return
 
         m = self._m
@@ -646,7 +761,55 @@ class ModelBuilder:
         #    SAP2000 library standard vehicle (Vehicles 1), which a non-Bridge
         #    license strips to a flat load (see the Vehicle library note above).
         veh_sources: list[str] = []
-        if ld.truck_axle_loads:
+        if ld.vehicles:
+            # Multi-vehicle class: registry trucks and/or engineer-supplied
+            # axle trains, all enveloped together in MLCLASS.
+            kf, lf = info["kip_to_force"], info["ft_to_len"]
+            vehicles = []
+            for vd in ld.vehicles:
+                if vd.truck_type:
+                    truck = vd.truck_type.upper().replace(" ", "")
+                    if truck in CALTRANS_PERMIT_TRUCKS:
+                        report["errors"].append(
+                            f"vehicle '{vd.name}': '{vd.truck_type}' is a Caltrans "
+                            f"permit vehicle — supply axle_loads/axle_spacings in "
+                            f"model units from a current Caltrans BDA source.")
+                        return
+                    entry = AASHTO_VEHICLES.get(truck)
+                    if entry is None:
+                        report["errors"].append(
+                            f"vehicle '{vd.name}': unknown truck_type "
+                            f"'{vd.truck_type}'. AASHTO vehicles: "
+                            f"{sorted(AASHTO_VEHICLES)}")
+                        return
+                    for vname, kip_axles, ft_spacings, klf_lane, source in entry:
+                        vehicles.append((
+                            vname,
+                            [a * kf for a in kip_axles],
+                            [s * lf for s in ft_spacings],
+                            klf_lane * kf / lf,
+                        ))
+                        veh_sources.append(f"{vname}: {source}")
+                else:
+                    if not vd.axle_loads:
+                        report["errors"].append(
+                            f"vehicle '{vd.name}': needs truck_type or "
+                            f"axle_loads + axle_spacings")
+                        return
+                    vehicles.append((
+                        vd.name,
+                        [float(a) for a in vd.axle_loads],
+                        [float(s) for s in (vd.axle_spacings or [])],
+                        float(vd.lane_load or 0.0),
+                    ))
+                    veh_sources.append(
+                        f"{vd.name}: engineer-supplied axle train "
+                        f"({info['force']}, {info['len']})")
+            veh_names = self._write_general_vehicles(report, "vehicles", vehicles)
+            if veh_names is None:
+                return
+            truck_desc = f"{len(veh_names)} vehicle(s): {', '.join(veh_names)}"
+        elif ld.truck_axle_loads:
             # Engineer-supplied axle train (values already in model units).
             axles = [float(a) for a in ld.truck_axle_loads]
             spacings = [float(s) for s in (ld.truck_axle_spacings or [])]
@@ -700,10 +863,35 @@ class ModelBuilder:
         # 2. Traffic lane + vehicle class, queued together into a SINGLE apply
         #    (importing vehicles in the same apply as the class regenerates the
         #    auto per-vehicle classes and clobbers custom ones). Lane runs along
-        #    the girder line closest to the middle of the deck.
-        row_indices = sorted(self._girder_rows)
-        mid_row = row_indices[len(row_indices) // 2]
-        frames = [name for _, name in sorted(self._girder_rows[mid_row])]
+        #    the member line given by lane_direction/lane_line_index, defaulting
+        #    to the girder line closest to the middle of the deck.
+        if ld.lane_direction is not None or ld.lane_line_index is not None:
+            ldir = (ld.lane_direction or "X").upper()
+            if ldir not in ("X", "Y") or ld.lane_line_index is None:
+                report["errors"].append(
+                    "lane_direction must be X or Y and lane_line_index must be "
+                    "given to target a lane member line")
+                return
+            line = self._frame_lines.get((ldir, ld.lane_line_index))
+            if not line:
+                report["errors"].append(
+                    f"No frames on {ldir}-direction grid line index "
+                    f"{ld.lane_line_index}; available lines: "
+                    f"{sorted(self._frame_lines)}")
+                return
+            frames = [name for _, name in sorted(line)]
+            lane_desc = f"{ldir}-direction line index {ld.lane_line_index}"
+        else:
+            if not self._girder_rows:
+                report["errors"].append(
+                    "Moving load default lane needs girders; give "
+                    "lane_direction + lane_line_index to use a frame group line")
+                return
+            row_indices = sorted(self._girder_rows)
+            mid_row = row_indices[len(row_indices) // 2]
+            frames = [name for _, name in sorted(self._girder_rows[mid_row])]
+            ldir = model.girders.direction if model.girders else "X"
+            lane_desc = f"girder row {mid_row}"
         lane_width = ld.lane_width or info["lane_width"]
 
         # Lane discretization: SAP2000 evaluates influence values at discrete
@@ -712,8 +900,7 @@ class ModelBuilder:
         # so envelope values AT the output stations are exact, not interpolated
         # (verified live: coarse default discretization under-reported interior
         # shear envelope by up to 10%).
-        coords = (model.grid.x_coords if model.girders.direction == "X"
-                  else model.grid.y_coords)
+        coords = (model.grid.x_coords if ldir == "X" else model.grid.y_coords)
         seg_lengths = [b - a for a, b in zip(coords, coords[1:]) if b > a]
         disc_along = min(seg_lengths) / 9.0 if seg_lengths else lane_width / 6.0
 
@@ -810,7 +997,7 @@ class ModelBuilder:
 
         report["loads"].append(
             f"Moving load case MOVE1: vehicle class MLCLASS ({truck_desc}) on LANE1 "
-            f"(width {lane_width} {info['len']}, along girder row {mid_row}, "
+            f"(width {lane_width} {info['len']}, along {lane_desc}, "
             f"{len(frames)} frames)"
         )
         for src in veh_sources:
