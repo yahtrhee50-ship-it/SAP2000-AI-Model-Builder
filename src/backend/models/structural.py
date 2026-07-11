@@ -60,6 +60,22 @@ class BeamLayout(BaseModel):
     col_indices: Optional[list[int]] = None
 
 
+class FrameGroup(BaseModel):
+    """A named family of identical members running along grid lines.
+
+    Unlike the legacy girders/beams pair, any number of groups may coexist,
+    each with its own section — e.g. girders + two secondary-beam sizes.
+    """
+    name: str = Field(..., description="Short group name; used in frame object names")
+    direction: str = Field("X", description="Member direction: X or Y")
+    section: FrameSection
+    line_indices: list[int] = Field(
+        ...,
+        description="Grid line indices the members run along: Y-line indices "
+                    "for X-direction members, X-line indices for Y-direction",
+    )
+
+
 class PileSupport(BaseModel):
     x: float
     y: float
@@ -80,11 +96,44 @@ class SlabDefinition(BaseModel):
     material_name: str = "Concrete_Slab"
 
 
+class VehicleDefinition(BaseModel):
+    """One vehicle for the moving-load class. Give either a registry
+    truck_type (HS20, HS15, HL-93 ...) or an explicit axle train in MODEL
+    units. All vehicles land in one enveloping class (MLCLASS)."""
+    name: str = Field(..., description="Vehicle name (unique in the model)")
+    truck_type: Optional[str] = Field(
+        None, description="AASHTO registry vehicle (HS20, HS15, HL-93); "
+                          "overrides axle_loads when given")
+    axle_loads: Optional[list[float]] = Field(
+        None, description="N axle point loads in model force units, front first")
+    axle_spacings: Optional[list[float]] = Field(
+        None, description="N-1 spacings between axles in model length units")
+    lane_load: float = Field(
+        0.0, description="Uniform design-lane load per unit length in model "
+                         "units (e.g. kip/ft), superimposed with the axles")
+
+
 class LoadDefinition(BaseModel):
     dead_load: float = Field(0.0, description="Superimposed dead load in model units (kN/m² metric / ksf imperial)")
     live_load: float = Field(0.0, description="Live load in model units (kN/m² metric / ksf imperial)")
     moving_load_enabled: bool = False
     lane_width: Optional[float] = Field(None, description="Traffic lane width in model length units (default 3.6 m / 12 ft)")
+    lane_direction: Optional[str] = Field(
+        None,
+        description="Direction of the member line the lane follows: X or Y. "
+                    "With lane_line_index, targets any frame line (girder, "
+                    "beam, or frame group). Default: middle girder row.",
+    )
+    lane_line_index: Optional[int] = Field(
+        None,
+        description="Grid line index of the lane's member line (X-line index "
+                    "for a Y-direction lane, Y-line index for X-direction).",
+    )
+    vehicles: Optional[list[VehicleDefinition]] = Field(
+        None,
+        description="Multiple vehicles for the moving-load class; overrides "
+                    "truck_type / truck_axle_loads when given.",
+    )
     truck_type: Optional[str] = Field(
         None,
         description="SAP2000 standard vehicle: P5/P7/P9/P11/P13 (Caltrans permit), "
@@ -117,6 +166,11 @@ class StructuralModel(BaseModel):
     grid: Optional[GridDefinition] = None
     girders: Optional[GirderLayout] = None
     beams: Optional[BeamLayout] = None
+    frame_groups: list[FrameGroup] = Field(
+        default_factory=list,
+        description="Any number of member families beyond the legacy "
+                    "girders/beams pair, each with its own section.",
+    )
     piles: list[PileSupport] = Field(default_factory=list)
     slab: Optional[SlabDefinition] = None
     loads: Optional[LoadDefinition] = None
@@ -124,7 +178,7 @@ class StructuralModel(BaseModel):
     def is_complete(self) -> bool:
         return all([
             self.grid is not None,
-            self.girders is not None,
+            self.girders is not None or bool(self.frame_groups),
             self.slab is not None,
             self.loads is not None,
             len(self.piles) > 0,
